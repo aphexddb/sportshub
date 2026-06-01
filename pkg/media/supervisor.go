@@ -1,6 +1,7 @@
 package media
 
 import (
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -43,7 +44,7 @@ func (s *Supervisor) StartMediaMTX() error {
 	binDir := filepath.Dir(s.mtxPath)
 	configPath := filepath.Join(binDir, "mediamtx.yml")
 
-	// Write a minimal config that enables RTMP on default port
+	// Minimal config that allows publishing on any path via RTMP
 	cfg := `logLevel: info
 rtmp: yes
 rtmpAddress: :1935
@@ -58,13 +59,15 @@ paths:
 	s.cmd = exec.Command(s.mtxPath, "-config", configPath)
 	s.cmd.Dir = binDir
 
+	log.Printf("[mediamtx] Starting MediaMTX from %s", s.mtxPath)
+
 	if err := s.cmd.Start(); err != nil {
 		return err
 	}
 	s.running = true
 
-	// Give it a moment to bind the port
-	time.Sleep(800 * time.Millisecond)
+	// Wait a bit for MediaMTX to bind the RTMP port
+	time.Sleep(1500 * time.Millisecond)
 	return nil
 }
 

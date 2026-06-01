@@ -62,6 +62,12 @@ func EnsureMediaMTX() (string, error) {
 	return path, nil
 }
 
+// GetFFmpegPath returns the path to the ffmpeg binary we manage (downloads it if missing).
+// This is the preferred way for all code to invoke ffmpeg so we don't depend on PATH.
+func GetFFmpegPath() (string, error) {
+	return EnsureFFmpeg()
+}
+
 // EnsureFFmpeg downloads a static ffmpeg.exe if not present
 func EnsureFFmpeg() (string, error) {
 	binDir, err := GetBinDir()

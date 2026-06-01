@@ -29,7 +29,11 @@ type Stream struct {
 
 var (
 	mu      sync.Mutex
-	streams = make(map[string]*Stream)
+	streams = make(map[string]*Stream) // key = raw camera ID from server list
+
+	// serverStreams: clean path (e.g. "cam0") -> raw cameraID
+	serverStreams = make(map[string]string)
+	nextCamIndex  int
 )
 
 func main() {
@@ -45,8 +49,8 @@ func main() {
 	port := ":8080"
 	log.Printf("=== SportsHub Windows Spike ===")
 	log.Printf("Open http://localhost%s", port)
-	log.Printf("Browser Live Preview (top section) should show your real Mevo + USB cams.")
-	log.Printf("Server RTMP list (bottom) requires ffmpeg in PATH.")
+	log.Printf("Browser Live Preview (top section) = browser getUserMedia")
+	log.Printf("Server RTMP list (bottom) = what our ffmpeg can see for real RTMP streaming")
 
 	if err := http.ListenAndServe(port, nil); err != nil {
 		log.Fatal(err)
@@ -75,21 +79,27 @@ func startStreamHandler(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewDecoder(r.Body).Decode(&req)
 
 	mu.Lock()
-	defer mu.Unlock()
 
-	rtmp := fmt.Sprintf("rtmp://127.0.0.1:1935/%s", sanitizeID(req.CameraID))
+	// Assign a clean, short stream path (cam0, cam1, ...)
+	streamPath := fmt.Sprintf("cam%d", nextCamIndex)
+	nextCamIndex++
+
+	rtmpURL := fmt.Sprintf("rtmp://127.0.0.1:1935/%s", streamPath)
 
 	streams[req.CameraID] = &Stream{
 		CameraID:  req.CameraID,
 		Active:    true,
-		RTMP:      rtmp,
+		RTMP:      rtmpURL,
 		StartedAt: time.Now().Format(time.RFC3339),
 	}
+	serverStreams[streamPath] = req.CameraID
 
-	// REAL: Launch MediaMTX (once) + ffmpeg ingest from the actual dshow device
+	mu.Unlock()
+
+	// Start the real ingest in background (MediaMTX + ffmpeg dshow → RTMP)
 	go func() {
-		if err := media.StartIngestForCamera(req.CameraID, rtmp); err != nil {
-			log.Printf("Ingest failed for %s: %v", req.CameraID, err)
+		if err := media.StartIngestForCamera(req.CameraID, streamPath); err != nil {
+			log.Printf("[server] Ingest failed for device %q → %s: %v", req.CameraID, streamPath, err)
 		}
 	}()
 
@@ -106,6 +116,14 @@ func stopStreamHandler(w http.ResponseWriter, r *http.Request) {
 
 	mu.Lock()
 	delete(streams, req.CameraID)
+
+	// Find and remove from serverStreams if present
+	for path, camID := range serverStreams {
+		if camID == req.CameraID {
+			delete(serverStreams, path)
+			break
+		}
+	}
 	mu.Unlock()
 
 	media.StopIngest(req.CameraID)
