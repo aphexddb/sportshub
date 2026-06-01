@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os/exec"
 	"runtime"
 	"strings"
 	"sync"
@@ -35,6 +36,12 @@ var (
 	// serverStreams: clean path (e.g. "cam0") -> raw cameraID
 	serverStreams = make(map[string]string)
 	nextCamIndex  int
+
+	// GameChanger state (only one active at a time for now)
+	gameChangerMu     sync.Mutex
+	gameChangerActive bool
+	gameChangerCmd    *exec.Cmd
+	gameChangerCamera string // e.g. "cam0"
 )
 
 func main() {
@@ -47,6 +54,11 @@ func main() {
 	http.HandleFunc("/api/stream/stop", stopStreamHandler)
 	http.HandleFunc("/api/status", statusHandler)
 	http.HandleFunc("/api/qr", qrHandler)
+
+	// GameChanger direct push
+	http.HandleFunc("/api/gamechanger/start", gameChangerStartHandler)
+	http.HandleFunc("/api/gamechanger/stop", gameChangerStopHandler)
+	http.HandleFunc("/api/gamechanger/status", gameChangerStatusHandler)
 
 	port := ":8080"
 	log.Printf("=== SportsHub Windows Spike ===")
@@ -171,4 +183,111 @@ func sanitizeID(s string) string {
 	s = strings.ReplaceAll(s, "=", "_")
 	s = strings.ReplaceAll(s, ":", "_")
 	return strings.ToLower(s)
+}
+
+// ==================== GameChanger Direct Push ====================
+
+type gameChangerStartReq struct {
+	CameraPath string `json:"cameraPath"` // e.g. "cam0"
+	GcServer   string `json:"gcServer"`   // e.g. rtmp://ingest.gamechanger.io/live
+	GcKey      string `json:"gcKey"`      // the stream key from GameChanger app
+}
+
+func gameChangerStartHandler(w http.ResponseWriter, r *http.Request) {
+	var req gameChangerStartReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	if req.CameraPath == "" || req.GcServer == "" || req.GcKey == "" {
+		http.Error(w, "cameraPath, gcServer and gcKey are required", http.StatusBadRequest)
+		return
+	}
+
+	gameChangerMu.Lock()
+	defer gameChangerMu.Unlock()
+
+	if gameChangerActive {
+		http.Error(w, "GameChanger stream already active", http.StatusConflict)
+		return
+	}
+
+	// Construct destination. GameChanger usually wants server + "/" + key
+	dest := strings.TrimRight(req.GcServer, "/") + "/" + strings.TrimLeft(req.GcKey, "/")
+
+	// Build a GameChanger-friendly ffmpeg command.
+	// We pull from our local MediaMTX clean feed (e.g. cam0) and push to GameChanger.
+	// The frontend should pass a clean local path like "cam0".
+	source := fmt.Sprintf("rtmp://127.0.0.1:1935/%s", req.CameraPath)
+
+	args := []string{
+		"-i", source,
+		"-c:v", "libx264",
+		"-preset", "veryfast",
+		"-tune", "zerolatency",
+		"-b:v", "4500k",
+		"-maxrate", "5000k",
+		"-bufsize", "6000k",
+		"-g", "60", // 2 seconds at 30fps
+		"-keyint_min", "60",
+		"-pix_fmt", "yuv420p",
+		"-c:a", "aac",
+		"-b:a", "128k",
+		"-f", "flv",
+		dest,
+	}
+
+	cmd := exec.Command("ffmpeg", args...)
+	cmd.Stdout = nil
+	cmd.Stderr = nil // in production we would capture this
+
+	if err := cmd.Start(); err != nil {
+		http.Error(w, fmt.Sprintf("failed to start GameChanger push: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	gameChangerCmd = cmd
+	gameChangerActive = true
+	gameChangerCamera = req.CameraPath
+
+	log.Printf("[gamechanger] Started push for %s → %s", req.CameraPath, dest)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"ok":      true,
+		"camera":  req.CameraPath,
+		"dest":    dest,
+	})
+}
+
+func gameChangerStopHandler(w http.ResponseWriter, r *http.Request) {
+	gameChangerMu.Lock()
+	defer gameChangerMu.Unlock()
+
+	if !gameChangerActive || gameChangerCmd == nil {
+		http.Error(w, "no active GameChanger stream", http.StatusConflict)
+		return
+	}
+
+	log.Printf("[gamechanger] Stopping stream for %s", gameChangerCamera)
+
+	_ = gameChangerCmd.Process.Kill()
+	gameChangerCmd = nil
+	gameChangerActive = false
+	gameChangerCamera = ""
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"ok": true})
+}
+
+func gameChangerStatusHandler(w http.ResponseWriter, r *http.Request) {
+	gameChangerMu.Lock()
+	defer gameChangerMu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"active": gameChangerActive,
+		"camera": gameChangerCamera,
+	})
 }

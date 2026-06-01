@@ -65,6 +65,49 @@
       <div id="server-cameras" class="space-y-3"></div>
     </div>
 
+    <!-- GameChanger Direct Push -->
+    <div class="mb-8">
+      <div class="flex items-center justify-between mb-4">
+        <div>
+          <h2 class="text-2xl font-semibold tracking-tight">GameChanger Live</h2>
+          <p class="text-zinc-400 text-sm">Push one camera directly to GameChanger (no OBS)</p>
+        </div>
+      </div>
+
+      <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+          <div>
+            <label class="block text-xs text-zinc-400 mb-1">Camera</label>
+            <select id="gc-camera" class="w-full bg-zinc-950 border border-zinc-700 rounded-xl px-3 py-2 text-sm">
+              <!-- populated by JS -->
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs text-zinc-400 mb-1">GameChanger RTMP Server</label>
+            <input id="gc-server" type="text" placeholder="rtmp://ingest.gamechanger.io/live"
+                   class="w-full bg-zinc-950 border border-zinc-700 rounded-xl px-3 py-2 text-sm font-mono">
+          </div>
+          <div>
+            <label class="block text-xs text-zinc-400 mb-1">Stream Key</label>
+            <input id="gc-key" type="text" placeholder="your-game-stream-key"
+                   class="w-full bg-zinc-950 border border-zinc-700 rounded-xl px-3 py-2 text-sm font-mono">
+          </div>
+        </div>
+
+        <div class="flex items-center gap-3">
+          <button onclick="startGameChanger()" 
+                  class="px-6 py-2 rounded-2xl bg-emerald-600 hover:bg-emerald-500 font-semibold text-sm">
+            Start GameChanger Stream
+          </button>
+          <button onclick="stopGameChanger()" 
+                  class="px-6 py-2 rounded-2xl bg-red-600 hover:bg-red-500 font-semibold text-sm">
+            Stop
+          </button>
+          <div id="gc-status" class="text-sm text-zinc-400 ml-2"></div>
+        </div>
+      </div>
+    </div>
+
     <div class="text-[10px] text-zinc-600 border-t border-zinc-900 pt-4">
       "Start RTMP Stream" uses the Go backend + MediaMTX. It will download MediaMTX + ffmpeg on first use (~150MB).
       The resulting RTMP URL (e.g. rtmp://127.0.0.1:1935/cam0) can be used in VLC, OBS, or GameChanger.
@@ -365,8 +408,102 @@ function showRTMPModal(cameraId) {
   document.body.appendChild(modal);
 }
 
+// ==================== GameChanger Direct Push (UI) ====================
+
+async function refreshGameChangerCameras() {
+  const select = document.getElementById('gc-camera');
+  if (!select) return;
+
+  try {
+    const res = await fetch('/api/sources');
+    const cams = await res.json();
+
+    select.innerHTML = '';
+    cams.forEach(cam => {
+      const opt = document.createElement('option');
+      opt.value = cam.id; // we pass the raw ID; backend will map via server list later if needed
+      // For simplicity in spike we use the clean path from serverStreams if possible.
+      // But the current /api/sources returns raw IDs. We'll use camera name for display.
+      opt.textContent = cam.name;
+      // Store the raw id as value for now
+      opt.value = cam.id;
+      select.appendChild(opt);
+    });
+  } catch (e) {
+    console.error('Failed to load cameras for GameChanger', e);
+  }
+}
+
+async function startGameChanger() {
+  const cameraID = document.getElementById('gc-camera').value;
+  const server = document.getElementById('gc-server').value.trim();
+  const key = document.getElementById('gc-key').value.trim();
+
+  if (!cameraID || !server || !key) {
+    alert('Please select a camera and enter both GameChanger Server and Stream Key');
+    return;
+  }
+
+  // We need the clean path (cam0 etc). For this spike we'll do a simple approach:
+  // Ask the backend to start using the raw camera ID. The backend will need to know which local stream to pull.
+  // For now we cheat a bit: we pass the raw ID and the backend will try to map it.
+  // Better long-term: expose clean paths in /api/sources response.
+
+  const res = await fetch('/api/gamechanger/start', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      cameraPath: cameraID, // temporary: in real version we'd send the clean path
+      gcServer: server,
+      gcKey: key
+    })
+  });
+
+  const data = await res.json();
+  if (!res.ok) {
+    alert('Failed to start GameChanger stream: ' + (data.error || res.statusText));
+    return;
+  }
+
+  updateGameChangerStatus();
+}
+
+async function stopGameChanger() {
+  await fetch('/api/gamechanger/stop', { method: 'POST' });
+  updateGameChangerStatus();
+}
+
+async function updateGameChangerStatus() {
+  const statusEl = document.getElementById('gc-status');
+  if (!statusEl) return;
+
+  try {
+    const res = await fetch('/api/gamechanger/status');
+    const data = await res.json();
+
+    if (data.active) {
+      statusEl.textContent = `Active → ${data.camera || 'unknown camera'}`;
+      statusEl.className = 'text-sm text-emerald-400 ml-2';
+    } else {
+      statusEl.textContent = 'Idle';
+      statusEl.className = 'text-sm text-zinc-400 ml-2';
+    }
+  } catch (e) {
+    statusEl.textContent = 'Error checking status';
+  }
+}
+
+// Hook into existing refresh so GameChanger camera list stays fresh
+const originalRefresh = window.refreshServerCameras || function(){};
+window.refreshServerCameras = async function() {
+  await originalRefresh();
+  await refreshGameChangerCameras();
+  await updateGameChangerStatus();
+};
+
 // Boot
 refreshServerCameras();
+updateGameChangerStatus();
 
 // Make scan available on load
 setTimeout(() => {
