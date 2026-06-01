@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/skip2/go-qrcode"
 	"sportshub2/pkg/media"
 	"sportshub2/pkg/sources"
 )
@@ -45,6 +46,7 @@ func main() {
 	http.HandleFunc("/api/stream/start", startStreamHandler)
 	http.HandleFunc("/api/stream/stop", stopStreamHandler)
 	http.HandleFunc("/api/status", statusHandler)
+	http.HandleFunc("/api/qr", qrHandler)
 
 	port := ":8080"
 	log.Printf("=== SportsHub Windows Spike ===")
@@ -99,7 +101,11 @@ func startStreamHandler(w http.ResponseWriter, r *http.Request) {
 	// Start the real ingest in background (MediaMTX + ffmpeg dshow → RTMP)
 	go func() {
 		if err := media.StartIngestForCamera(req.CameraID, streamPath); err != nil {
-			log.Printf("[server] Ingest failed for device %q → %s: %v", req.CameraID, streamPath, err)
+			log.Printf("[server] ============================================")
+			log.Printf("[server] Ingest FAILED for device %q → %s", req.CameraID, streamPath)
+			log.Printf("[server] Error: %v", err)
+			log.Printf("[server] Common causes: MediaMTX not ready, device in use by browser, wrong resolution for camera")
+			log.Printf("[server] ============================================")
 		}
 	}()
 
@@ -139,6 +145,25 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 		"version": "0.0.1-dev",
 		"os":      runtime.GOOS,
 	})
+}
+
+// qrHandler serves a PNG QR code for a given text (used for RTMP URLs)
+func qrHandler(w http.ResponseWriter, r *http.Request) {
+	text := r.URL.Query().Get("text")
+	if text == "" {
+		http.Error(w, "missing text", http.StatusBadRequest)
+		return
+	}
+
+	png, err := qrcode.Encode(text, qrcode.Medium, 256)
+	if err != nil {
+		http.Error(w, "failed to generate qr", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	w.Write(png)
 }
 
 func sanitizeID(s string) string {

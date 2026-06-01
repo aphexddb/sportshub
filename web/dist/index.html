@@ -355,22 +355,14 @@ function showRTMPModal(cameraId) {
       </div>
 
       <div class="text-xs text-zinc-400 mb-2">QR Code</div>
-      <div id="qr-container" class="bg-white p-5 rounded-2xl w-fit mb-6"></div>
+      <img src="/api/qr?text=${encodeURIComponent(stream.rtmp)}" 
+           class="bg-white p-3 rounded-2xl w-[200px] h-[200px] mb-6" alt="QR Code for ${stream.rtmp}">
 
       <button onclick="this.closest('.fixed').remove()" 
               class="w-full py-3 rounded-2xl bg-white text-black font-semibold">Close</button>
     </div>
   `;
   document.body.appendChild(modal);
-
-  // Generate QR
-  if (window.QRCode) {
-    new QRCode(modal.querySelector('#qr-container'), {
-      text: stream.rtmp,
-      width: 200,
-      height: 200,
-    });
-  }
 }
 
 // Boot

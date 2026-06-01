@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"log"
 	"os/exec"
+	"strings"
 	"sync"
-	"time"
 )
 
 var (
@@ -30,30 +30,40 @@ func StartIngestForCamera(cameraID, streamPath string) error {
 			return err
 		}
 		if err := globalSupervisor.StartMediaMTX(); err != nil {
-			return fmt.Errorf("failed to start MediaMTX: %w", err)
+			return fmt.Errorf("MediaMTX failed to start: %w", err)
 		}
-		// Give MediaMTX a bit more time to be ready
-		time.Sleep(1200 * time.Millisecond)
 	}
 
 	ffmpegPath, _ := EnsureFFmpeg()
 
+	// Normalize the dshow input.
+	// The server list sends IDs like "video=Mevo-2GB5D", but sometimes we get just the name.
+	// We want exactly one "video=" prefix.
+	input := cameraID
+	if !strings.HasPrefix(strings.ToLower(input), "video=") {
+		input = "video=" + input
+	}
+
 	// Build a solid low-latency command for dshow webcams / Mevo Start.
-	// We prefer video-only first for reliability (audio device names often differ).
-	// You can extend this later to detect and include audio.
+	// We deliberately start at 720p30 — this is much more reliable on USB webcams than 1080p.
+	// Video-only for now (audio device names frequently differ).
 	args := []string{
 		"-f", "dshow",
-		"-rtbufsize", "100M",
-		"-i", "video=" + cameraID,
+		"-rtbufsize", "200M",
+		"-video_size", "1280x720",
+		"-framerate", "30",
+		"-use_wallclock_as_timestamps", "1",
+		"-i", input,
 		"-c:v", "libx264",
 		"-preset", "veryfast",
 		"-tune", "zerolatency",
-		"-b:v", "4000k",
-		"-maxrate", "5000k",
-		"-bufsize", "8000k",
+		"-b:v", "3500k",
+		"-maxrate", "4500k",
+		"-bufsize", "7000k",
 		"-g", "30",
 		"-keyint_min", "30",
 		"-pix_fmt", "yuv420p",
+		"-fflags", "+genpts",
 		"-f", "flv",
 		"rtmp://127.0.0.1:1935/" + streamPath,
 	}
@@ -62,9 +72,23 @@ func StartIngestForCamera(cameraID, streamPath string) error {
 	log.Printf("[ingest] ffmpeg %v", args)
 
 	cmd := exec.Command(ffmpegPath, args...)
-	cmd.Stdout = nil
-	// Capture stderr so we can see useful errors in the console
-	cmd.Stderr = nil // we can improve this later with pipes if needed
+
+	// Capture stderr for diagnostics (critical when ingest fails)
+	stderrPipe, _ := cmd.StderrPipe()
+	go func() {
+		if stderrPipe != nil {
+			buf := make([]byte, 4096)
+			for {
+				n, err := stderrPipe.Read(buf)
+				if n > 0 {
+					log.Printf("[ffmpeg stderr] %s", string(buf[:n]))
+				}
+				if err != nil {
+					break
+				}
+			}
+		}
+	}()
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("failed to start ffmpeg: %w", err)
