@@ -80,6 +80,12 @@ func parseDSHOWOutput(output []byte) []Camera {
 			if start != -1 && end != -1 && end > start {
 				name := strings.TrimSpace(line[start+1 : end])
 				if name != "" && !strings.HasPrefix(strings.ToLower(name), "dummy") {
+					lowerName := strings.ToLower(name)
+					// WDM devices (e.g. "Mevo Wireless Camera (WDM)") are virtual wrappers
+					// and cannot be used for actual streaming/capture in this context.
+					if strings.Contains(lowerName, "wdm") {
+						continue
+					}
 					cams = append(cams, Camera{
 						ID:   "video=" + name,
 						Name: name,
@@ -96,6 +102,10 @@ func parseDSHOWOutput(output []byte) []Camera {
 			if start != -1 && end != -1 && end > start {
 				name := strings.TrimSpace(line[start+1 : end])
 				if name != "" && !strings.HasPrefix(strings.ToLower(name), "dummy") {
+					lowerName := strings.ToLower(name)
+					if strings.Contains(lowerName, "wdm") {
+						continue
+					}
 					cams = append(cams, Camera{
 						ID:   "video=" + name,
 						Name: name,
@@ -109,7 +119,7 @@ func parseDSHOWOutput(output []byte) []Camera {
 	if len(cams) == 0 {
 		cams = append(cams, Camera{
 			ID:   "no-devices",
-			Name: "No video devices discovered by ffmpeg dshow (see raw output in console)",
+			Name: "No video devices discovered by ffmpeg dshow (WDM devices are filtered)",
 		})
 	}
 

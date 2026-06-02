@@ -63,6 +63,7 @@
       </div>
 
       <div id="server-cameras" class="space-y-3"></div>
+      <div class="mt-2 text-xs text-zinc-500">Raw devices from the system are listed below. Click "Start RTMP Stream (local)" to activate a clean path (cam0, cam1...) which can then be used for GameChanger. Active ones show the clean path + "Use for GameChanger" button.</div>
     </div>
 
     <!-- GameChanger Direct Push -->
@@ -70,25 +71,38 @@
       <div class="flex items-center justify-between mb-4">
         <div>
           <h2 class="text-2xl font-semibold tracking-tight">GameChanger Live</h2>
-          <p class="text-zinc-400 text-sm">Push one camera directly to GameChanger (no OBS)</p>
+          <p class="text-zinc-400 text-sm">Push one camera directly to GameChanger (no OBS). Must have an active local stream (cam0 etc.) first.</p>
         </div>
       </div>
 
       <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-          <div>
-            <label class="block text-xs text-zinc-400 mb-1">Camera</label>
-            <select id="gc-camera" class="w-full bg-zinc-950 border border-zinc-700 rounded-xl px-3 py-2 text-sm">
-              <!-- populated by JS -->
-            </select>
+        <div class="mb-4">
+          <label class="block text-xs text-zinc-400 mb-1">Camera (clean path)</label>
+          <select id="gc-camera" class="w-full bg-zinc-950 border border-zinc-700 rounded-xl px-3 py-2 text-sm">
+            <!-- populated by JS from active clean streams -->
+          </select>
+        </div>
+
+        <div class="mb-4">
+          <label class="block text-xs text-amber-400 mb-1 font-medium">
+            Full RTMP URL (recommended — paste exactly what GameChanger gives you)
+          </label>
+          <input id="gc-full-url" type="text" 
+                 placeholder="rtmp://601c62c19c9e.global-contribute.live-video.net/app/sk_...gc_ext=true"
+                 class="w-full bg-zinc-950 border border-zinc-700 rounded-xl px-3 py-2 text-sm font-mono">
+          <div class="text-[10px] text-zinc-500 mt-1">
+            If you paste a full URL here, it will be used and the two fields below will be ignored.
           </div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4 opacity-60">
           <div>
-            <label class="block text-xs text-zinc-400 mb-1">GameChanger RTMP Server</label>
+            <label class="block text-xs text-zinc-400 mb-1">RTMP Server (fallback)</label>
             <input id="gc-server" type="text" placeholder="rtmp://ingest.gamechanger.io/live"
                    class="w-full bg-zinc-950 border border-zinc-700 rounded-xl px-3 py-2 text-sm font-mono">
           </div>
           <div>
-            <label class="block text-xs text-zinc-400 mb-1">Stream Key</label>
+            <label class="block text-xs text-zinc-400 mb-1">Stream Key (fallback)</label>
             <input id="gc-key" type="text" placeholder="your-game-stream-key"
                    class="w-full bg-zinc-950 border border-zinc-700 rounded-xl px-3 py-2 text-sm font-mono">
           </div>
@@ -132,8 +146,7 @@ async function scanBrowserCameras() {
     const allDevices = await navigator.mediaDevices.enumerateDevices();
     let videoDevices = allDevices.filter(d => d.kind === 'videoinput');
 
-    // Hard filter: aggressively hide known-broken Mevo WDM entries and similar junk
-    // These often appear in enumerateDevices but cannot deliver usable video.
+    // Hard filter: hide WDM devices — they are virtual wrappers and cannot be used for streaming.
     videoDevices = videoDevices.filter(d => {
       const label = (d.label || '').toLowerCase();
       if (label.includes('wdm')) return false;
@@ -304,14 +317,23 @@ function copyDeviceId(id) {
 let serverCameras = [];
 let serverActive = {};
 
+let activeCleanStreams = []; // populated from /api/active-streams
+
 async function refreshServerCameras() {
   const container = document.getElementById('server-cameras');
   container.innerHTML = '<div class="text-zinc-400 py-4 text-center text-sm">Loading from server...</div>';
 
   try {
-    const res = await fetch('/api/sources');
-    serverCameras = await res.json();
+    const [sourcesRes, activeRes] = await Promise.all([
+      fetch('/api/sources'),
+      fetch('/api/active-streams')
+    ]);
+
+    serverCameras = await sourcesRes.json();
+    activeCleanStreams = await activeRes.json();
+
     renderServerCameras();
+    refreshGameChangerCameras(); // keep GC dropdown fresh
   } catch (e) {
     container.innerHTML = '<div class="text-red-400 py-4 text-center">Failed to load server cameras</div>';
   }
@@ -321,36 +343,112 @@ function renderServerCameras() {
   const container = document.getElementById('server-cameras');
   container.innerHTML = '';
 
+  // Build map from rawId to clean path info for quick lookup
+  const rawToActive = {};
+  activeCleanStreams.forEach(s => {
+    rawToActive[s.rawId] = s;
+  });
+
   if (!serverCameras || serverCameras.length === 0) {
-    container.innerHTML = '<div class="text-zinc-400 py-4 text-center text-sm">No cameras reported by backend. Try clicking Refresh.</div>';
+    container.innerHTML = '<div class="text-zinc-400 py-4 text-center text-sm">No devices reported by backend. Make sure ffmpeg is available and click Refresh.</div>';
     return;
   }
 
+  // Always show the raw device list from /api/sources so user can start local streams
   serverCameras.forEach(cam => {
-    const isActive = serverActive[cam.id];
+    const active = rawToActive[cam.id];
     const div = document.createElement('div');
     div.className = 'bg-zinc-900 border border-zinc-800 rounded-2xl p-5 flex items-center gap-4';
 
-    let actionsHTML = '';
-    if (isActive) {
-      actionsHTML = `
-        <span class="text-emerald-400 text-sm font-medium mr-3">STREAMING TO RTMP</span>
-        <button onclick="stopServerStream('${cam.id}')" class="px-5 py-2 rounded-2xl bg-red-600 hover:bg-red-500 text-sm font-medium">Stop</button>
-        <button onclick="showRTMPModal('${cam.id}')" class="px-5 py-2 rounded-2xl bg-zinc-800 hover:bg-zinc-700 text-sm font-medium">Show RTMP URL + QR</button>
+    let actions = '';
+    if (active) {
+      actions = `
+        <span class="text-emerald-400 text-xs font-medium mr-2">${active.path}</span>
+        <button onclick="useForGameChanger('${active.path}', '${cam.id}')" 
+                class="px-3 py-1 text-xs rounded-2xl bg-amber-600 hover:bg-amber-500 font-medium">
+          Use for GameChanger
+        </button>
+        <button onclick="showRTMPModalByPath('${active.path}')" 
+                class="px-3 py-1 text-xs rounded-2xl bg-zinc-800 hover:bg-zinc-700 font-medium">
+          Show RTMP + QR
+        </button>
+        <button onclick="stopServerStreamByPath('${active.path}')" 
+                class="px-3 py-1 text-xs rounded-2xl bg-red-600 hover:bg-red-500 font-medium">
+          Stop
+        </button>
       `;
     } else {
-      actionsHTML = `<button onclick="startServerStream('${cam.id}')" class="px-6 py-2 rounded-2xl bg-white text-black font-semibold text-sm hover:bg-zinc-200">Start RTMP Stream</button>`;
+      actions = `<button onclick="startServerStream('${cam.id}')" 
+                 class="px-4 py-1.5 text-xs rounded-2xl bg-white text-black font-semibold hover:bg-zinc-200">
+        Start RTMP Stream (local)
+      </button>`;
     }
 
     div.innerHTML = `
-      <div class="flex-1">
+      <div class="flex-1 min-w-0">
         <div class="font-semibold">${cam.name}</div>
         <div class="text-xs text-zinc-500 font-mono">${cam.id}</div>
       </div>
-      <div class="flex items-center">${actionsHTML}</div>
+      <div class="flex items-center gap-2 text-right">${actions}</div>
     `;
     container.appendChild(div);
   });
+}
+
+// Helper to start local RTMP from the old device list (kept for compatibility)
+async function startServerStream(cameraId) {
+  const res = await fetch('/api/stream/start', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cameraId })
+  });
+  const data = await res.json();
+  if (data.ok) {
+    serverActive[cameraId] = data.stream;
+    await refreshServerCameras();
+  } else {
+    alert('Failed: ' + (data.error || 'unknown'));
+  }
+}
+
+async function stopServerStreamByPath(path) {
+  // Find the raw camera ID for this path
+  const info = activeCleanStreams.find(s => s.path === path);
+  if (!info) return alert('Could not find stream');
+
+  await fetch('/api/stream/stop', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cameraId: info.rawId })
+  });
+  await refreshServerCameras();
+}
+
+// Called from the new "Use for GameChanger" button
+function useForGameChanger(cleanPath, rawId) {
+  // Pre-fill the GameChanger form
+  const select = document.getElementById('gc-camera');
+  if (select) {
+    // We store the clean path in a data attribute or just use the value as the path
+    // For simplicity we temporarily add an option with the clean path
+    let found = false;
+    for (let opt of select.options) {
+      if (opt.value === cleanPath) {
+        select.value = cleanPath;
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      const opt = new Option(`${cleanPath} (${rawId})`, cleanPath);
+      select.appendChild(opt);
+      select.value = cleanPath;
+    }
+  }
+
+  // Scroll to GameChanger section
+  document.querySelector('#gc-server')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  document.getElementById('gc-server')?.focus();
 }
 
 async function startServerStream(cameraId) {
@@ -363,8 +461,9 @@ async function startServerStream(cameraId) {
 
   if (data.ok) {
     serverActive[cameraId] = data.stream;
-    renderServerCameras();
-    showRTMPModal(cameraId);
+    await refreshServerCameras();  // this will refetch active and re-render with clean paths + buttons
+    // Optionally show the modal for the new stream - but since we don't have the exact path here easily, skip for now
+    // The user can use the "Show RTMP + QR" button after refresh
   } else {
     alert('Failed to start server stream: ' + (data.error || JSON.stringify(data)));
   }
@@ -408,64 +507,139 @@ function showRTMPModal(cameraId) {
   document.body.appendChild(modal);
 }
 
+function showRTMPModalByPath(path) {
+  const info = (activeCleanStreams || []).find(s => s.path === path);
+  if (!info) return alert('Active stream info not found for ' + path);
+
+  const rtmpUrl = `rtmp://127.0.0.1:1935/${path}`;
+  const modal = document.createElement('div');
+  modal.className = 'fixed inset-0 bg-black/90 flex items-center justify-center z-[100] p-6';
+  modal.innerHTML = `
+    <div class="bg-zinc-900 border border-zinc-700 rounded-3xl max-w-lg w-full p-8">
+      <div class="font-semibold text-xl mb-1">RTMP Stream Active</div>
+      <div class="text-sm text-zinc-400 mb-6">${info.name || info.rawId} (${path})</div>
+
+      <div class="text-xs text-zinc-400 mb-1.5">RTMP URL (use in VLC, OBS, or GameChanger)</div>
+      <div onclick="navigator.clipboard.writeText(this.innerText)" 
+           class="font-mono text-sm bg-black p-4 rounded-2xl text-emerald-400 cursor-pointer break-all mb-6 select-all">
+        ${rtmpUrl}
+      </div>
+
+      <div class="text-xs text-zinc-400 mb-2">QR Code</div>
+      <img src="/api/qr?text=${encodeURIComponent(rtmpUrl)}" 
+           class="bg-white p-3 rounded-2xl w-[200px] h-[200px] mb-6" alt="QR Code">
+
+      <button onclick="this.closest('.fixed').remove()" 
+              class="w-full py-3 rounded-2xl bg-white text-black font-semibold">Close</button>
+    </div>
+  `;
+  document.body.appendChild(modal);
+}
+
 // ==================== GameChanger Direct Push (UI) ====================
 
 async function refreshGameChangerCameras() {
   const select = document.getElementById('gc-camera');
   if (!select) return;
 
-  try {
-    const res = await fetch('/api/sources');
-    const cams = await res.json();
+  select.innerHTML = '';
 
-    select.innerHTML = '';
-    cams.forEach(cam => {
+  if (activeCleanStreams && activeCleanStreams.length > 0) {
+    activeCleanStreams.forEach(s => {
       const opt = document.createElement('option');
-      opt.value = cam.id; // we pass the raw ID; backend will map via server list later if needed
-      // For simplicity in spike we use the clean path from serverStreams if possible.
-      // But the current /api/sources returns raw IDs. We'll use camera name for display.
-      opt.textContent = cam.name;
-      // Store the raw id as value for now
-      opt.value = cam.id;
+      opt.value = s.path;                    // clean path (what backend expects for pulling from MediaMTX)
+      opt.textContent = `${s.path} — ${s.name || s.rawId}`;
       select.appendChild(opt);
     });
-  } catch (e) {
-    console.error('Failed to load cameras for GameChanger', e);
+  } else {
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = '(no active local streams - start one in Server Cameras first)';
+    opt.disabled = true;
+    select.appendChild(opt);
   }
 }
 
 async function startGameChanger() {
-  const cameraID = document.getElementById('gc-camera').value;
-  const server = document.getElementById('gc-server').value.trim();
-  const key = document.getElementById('gc-key').value.trim();
+  const select = document.getElementById('gc-camera');
+  const serverEl = document.getElementById('gc-server');
+  const keyEl = document.getElementById('gc-key');
+  const statusEl = document.getElementById('gc-status');
 
-  if (!cameraID || !server || !key) {
-    alert('Please select a camera and enter both GameChanger Server and Stream Key');
+  const cameraPath = select ? select.value : '';
+  const fullUrl = document.getElementById('gc-full-url') ? document.getElementById('gc-full-url').value.trim() : '';
+  const server = serverEl ? serverEl.value.trim() : '';
+  const key = keyEl ? keyEl.value.trim() : '';
+
+  if (!cameraPath || cameraPath.includes('no active')) {
+    console.error('[GameChanger] No valid clean path selected for GameChanger. Start a local stream first.');
+    if (statusEl) {
+      statusEl.textContent = 'No active local stream selected';
+      statusEl.className = 'text-sm text-red-400 ml-2';
+    }
     return;
   }
 
-  // We need the clean path (cam0 etc). For this spike we'll do a simple approach:
-  // Ask the backend to start using the raw camera ID. The backend will need to know which local stream to pull.
-  // For now we cheat a bit: we pass the raw ID and the backend will try to map it.
-  // Better long-term: expose clean paths in /api/sources response.
+  if (!fullUrl && (!server || !key)) {
+    console.error('[GameChanger] No full URL and no server+key provided');
+    if (statusEl) {
+      statusEl.textContent = 'Missing URL or Server+Key';
+      statusEl.className = 'text-sm text-red-400 ml-2';
+    }
+    return;
+  }
 
-  const res = await fetch('/api/gamechanger/start', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      cameraPath: cameraID, // temporary: in real version we'd send the clean path
+  if (statusEl) {
+    statusEl.textContent = 'Starting...';
+    statusEl.className = 'text-sm text-yellow-400 ml-2';
+  }
+
+  try {
+    const payload = {
+      cameraPath: cameraPath,
       gcServer: server,
-      gcKey: key
-    })
-  });
+      gcKey: key,
+      gcFullUrl: fullUrl || undefined
+    };
+    console.log('[GameChanger] Sending start payload:', payload);
+    const res = await fetch('/api/gamechanger/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
 
-  const data = await res.json();
-  if (!res.ok) {
-    alert('Failed to start GameChanger stream: ' + (data.error || res.statusText));
-    return;
+    let data = {};
+    try {
+      data = await res.json();
+    } catch (e) {
+      data = {};
+    }
+
+    if (!res.ok) {
+      const msg = data.error || data.message || res.statusText || 'Unknown error';
+      console.error('[GameChanger] Start failed:', msg, data);
+      if (statusEl) {
+        statusEl.textContent = 'Failed: ' + msg;
+        statusEl.className = 'text-sm text-red-400 ml-2';
+      }
+      return;
+    }
+
+    if (statusEl) {
+      statusEl.textContent = 'Active → ' + (data.camera || cameraPath);
+      statusEl.className = 'text-sm text-emerald-400 ml-2';
+    }
+
+    // Poll status while active
+    setTimeout(updateGameChangerStatus, 3000);
+
+  } catch (err) {
+    console.error('[GameChanger] Network error:', err);
+    if (statusEl) {
+      statusEl.textContent = 'Network Error';
+      statusEl.className = 'text-sm text-red-400 ml-2';
+    }
   }
-
-  updateGameChangerStatus();
 }
 
 async function stopGameChanger() {
@@ -500,6 +674,11 @@ window.refreshServerCameras = async function() {
   await refreshGameChangerCameras();
   await updateGameChangerStatus();
 };
+
+// Ensure GC dropdown is populated on initial load too
+setTimeout(() => {
+  if (typeof refreshGameChangerCameras === 'function') refreshGameChangerCameras();
+}, 1000);
 
 // Boot
 refreshServerCameras();
