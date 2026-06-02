@@ -38,16 +38,28 @@ var (
 	nextCamIndex  int
 
 	// GameChanger state (only one active at a time for now)
-	gameChangerMu     sync.Mutex
-	gameChangerActive bool
-	gameChangerCmd    *exec.Cmd
-	gameChangerCamera string // e.g. "cam0"
+	gcMu         sync.Mutex
+	gcActive     bool
+	gcCmd        *exec.Cmd
+	gcActivePath string // e.g. "cam0"
+	gcCamera     string // raw or name for display
+
+	// last used GC config per clean path, for easy restart
+	gcLastConfigs = make(map[string]GCConfig)
 )
+
+type GCConfig struct {
+	FullURL string `json:"fullUrl,omitempty"`
+	Server  string `json:"server,omitempty"`
+	Key     string `json:"key,omitempty"`
+}
 
 type ServerStreamInfo struct {
 	RawID   string `json:"rawId"`
 	Name    string `json:"name"`
 	Path    string `json:"path"`
+	GCActive bool `json:"gcActive"`
+	GCLast   *GCConfig `json:"gcLast,omitempty"`
 }
 
 func main() {
@@ -148,8 +160,10 @@ func stopStreamHandler(w http.ResponseWriter, r *http.Request) {
 	delete(streams, req.CameraID)
 
 	// Find and remove from serverStreams if present
+	stoppedPath := ""
 	for path, info := range serverStreams {
 		if info.RawID == req.CameraID {
+			stoppedPath = path
 			delete(serverStreams, path)
 			break
 		}
@@ -157,6 +171,20 @@ func stopStreamHandler(w http.ResponseWriter, r *http.Request) {
 	mu.Unlock()
 
 	media.StopIngest(req.CameraID)
+
+	// If this path was the one sending to GC, stop the GC push too
+	if stoppedPath != "" && stoppedPath == gcActivePath {
+		gcMu.Lock()
+		if gcCmd != nil {
+			_ = gcCmd.Process.Kill()
+			gcCmd = nil
+		}
+		gcActivePath = ""
+		gcActive = false
+		gcCamera = ""
+		gcMu.Unlock()
+		log.Printf("[gamechanger] Stopped because local stream %s was stopped", stoppedPath)
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"ok": true})
@@ -255,10 +283,10 @@ func gameChangerStartHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	gameChangerMu.Lock()
-	defer gameChangerMu.Unlock()
+	gcMu.Lock()
+	defer gcMu.Unlock()
 
-	if gameChangerActive {
+	if gcActive {
 		http.Error(w, "GameChanger stream already active", http.StatusConflict)
 		return
 	}
@@ -333,9 +361,17 @@ func gameChangerStartHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	gameChangerCmd = cmd
-	gameChangerActive = true
-	gameChangerCamera = req.CameraPath
+	gcCmd = cmd
+	gcActive = true
+	gcActivePath = req.CameraPath
+	gcCamera = req.CameraPath
+
+	// store last config for this path for easy restart
+	gcLastConfigs[req.CameraPath] = GCConfig{
+		FullURL: req.GcFullUrl,
+		Server:  req.GcServer,
+		Key:     req.GcKey,
+	}
 
 	log.Printf("[gamechanger] Started push for %s → %s (fullUrl=%v)", req.CameraPath, dest, req.GcFullUrl != "")
 
@@ -348,43 +384,58 @@ func gameChangerStartHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func gameChangerStopHandler(w http.ResponseWriter, r *http.Request) {
-	gameChangerMu.Lock()
-	defer gameChangerMu.Unlock()
+	gcMu.Lock()
+	defer gcMu.Unlock()
 
-	if !gameChangerActive || gameChangerCmd == nil {
+	if !gcActive || gcCmd == nil {
 		http.Error(w, "no active GameChanger stream", http.StatusConflict)
 		return
 	}
 
-	log.Printf("[gamechanger] Stopping stream for %s", gameChangerCamera)
+	log.Printf("[gamechanger] Stopping stream for %s", gcCamera)
 
-	_ = gameChangerCmd.Process.Kill()
-	gameChangerCmd = nil
-	gameChangerActive = false
-	gameChangerCamera = ""
+	_ = gcCmd.Process.Kill()
+	gcCmd = nil
+	gcActive = false
+	gcActivePath = ""
+	gcCamera = ""
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"ok": true})
 }
 
 func gameChangerStatusHandler(w http.ResponseWriter, r *http.Request) {
-	gameChangerMu.Lock()
-	defer gameChangerMu.Unlock()
+	gcMu.Lock()
+	defer gcMu.Unlock()
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
-		"active": gameChangerActive,
-		"camera": gameChangerCamera,
+		"active": gcActive,
+		"camera": gcCamera,
+		"path":   gcActivePath,
 	})
 }
 
 func activeStreamsHandler(w http.ResponseWriter, r *http.Request) {
 	mu.Lock()
+	gcMu.Lock()
+	defer gcMu.Unlock()
 	defer mu.Unlock()
 
 	result := []ServerStreamInfo{}
-	for _, info := range serverStreams {
-		result = append(result, info)
+	for path, info := range serverStreams {
+		as := ServerStreamInfo{
+			RawID: info.RawID,
+			Name:  info.Name,
+			Path:  path,
+		}
+		if path == gcActivePath {
+			as.GCActive = true
+		}
+		if last, ok := gcLastConfigs[path]; ok {
+			as.GCLast = &last
+		}
+		result = append(result, as)
 	}
 
 	w.Header().Set("Content-Type", "application/json")

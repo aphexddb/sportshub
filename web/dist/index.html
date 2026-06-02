@@ -113,7 +113,7 @@
                   class="px-6 py-2 rounded-2xl bg-emerald-600 hover:bg-emerald-500 font-semibold text-sm">
             Start GameChanger Stream
           </button>
-          <button onclick="stopGameChanger()" 
+          <button onclick="stopGameChangerAndRefresh()" 
                   class="px-6 py-2 rounded-2xl bg-red-600 hover:bg-red-500 font-semibold text-sm">
             Stop
           </button>
@@ -217,7 +217,7 @@ function renderBrowserPreviews() {
       </div>
 
       <div id="preview-${device.deviceId}" class="hidden mb-4">
-        <video id="video-${device.deviceId}" autoplay playsinline muted class="w-full rounded-2xl border border-zinc-700" style="max-height: 320px; background:#111;"></video>
+        <video id="video-${device.deviceId}" autoplay playsinline class="w-full rounded-2xl border border-zinc-700" style="max-height: 320px; background:#111;"></video>
         <div class="flex gap-2 mt-3">
           <button onclick="stopBrowserPreview('${device.deviceId}')" 
                   class="flex-1 py-2 rounded-2xl bg-red-600 hover:bg-red-500 text-sm font-medium">Stop Preview</button>
@@ -255,7 +255,7 @@ async function startBrowserPreview(deviceId, button) {
 
     const stream = await navigator.mediaDevices.getUserMedia({
       video: { deviceId: { exact: deviceId } },
-      audio: false
+      audio: true  // include audio for testing camera mics
     });
     activeBrowserStreams[deviceId] = stream;
 
@@ -362,19 +362,42 @@ function renderServerCameras() {
 
     let actions = '';
     if (active) {
+      const gcActive = !!active.gcActive;
+      const last = active.gcLast;
+      let gcActions = '';
+      if (gcActive) {
+        gcActions = `
+          <span class="text-emerald-400 text-xs font-medium mr-1">SENDING TO GC</span>
+          <button onclick="stopGameChangerAndRefresh()" 
+                  class="px-3 py-1 text-xs rounded-2xl bg-red-600 hover:bg-red-500 font-medium">
+            STOP GC
+          </button>
+        `;
+      } else if (last) {
+        gcActions = `
+          <button onclick="restartGCWithLast('${active.path}', ${JSON.stringify(last)})" 
+                  class="px-3 py-1 text-xs rounded-2xl bg-amber-600 hover:bg-amber-500 font-medium">
+            Restart GC (last)
+          </button>
+        `;
+      } else {
+        gcActions = `
+          <button onclick="useForGameChanger('${active.path}', '${cam.id}')" 
+                  class="px-3 py-1 text-xs rounded-2xl bg-amber-600 hover:bg-amber-500 font-medium">
+            Use for GameChanger
+          </button>
+        `;
+      }
       actions = `
         <span class="text-emerald-400 text-xs font-medium mr-2">${active.path}</span>
-        <button onclick="useForGameChanger('${active.path}', '${cam.id}')" 
-                class="px-3 py-1 text-xs rounded-2xl bg-amber-600 hover:bg-amber-500 font-medium">
-          Use for GameChanger
-        </button>
+        ${gcActions}
         <button onclick="showRTMPModalByPath('${active.path}')" 
                 class="px-3 py-1 text-xs rounded-2xl bg-zinc-800 hover:bg-zinc-700 font-medium">
           Show RTMP + QR
         </button>
         <button onclick="stopServerStreamByPath('${active.path}')" 
                 class="px-3 py-1 text-xs rounded-2xl bg-red-600 hover:bg-red-500 font-medium">
-          Stop
+          Stop Local
         </button>
       `;
     } else {
@@ -429,8 +452,6 @@ function useForGameChanger(cleanPath, rawId) {
   // Pre-fill the GameChanger form
   const select = document.getElementById('gc-camera');
   if (select) {
-    // We store the clean path in a data attribute or just use the value as the path
-    // For simplicity we temporarily add an option with the clean path
     let found = false;
     for (let opt of select.options) {
       if (opt.value === cleanPath) {
@@ -446,9 +467,45 @@ function useForGameChanger(cleanPath, rawId) {
     }
   }
 
-  // Scroll to GameChanger section
-  document.querySelector('#gc-server')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  document.getElementById('gc-server')?.focus();
+  // Scroll to GameChanger section and focus full URL
+  document.querySelector('#gc-full-url')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  document.getElementById('gc-full-url')?.focus() || document.getElementById('gc-server')?.focus();
+}
+
+// Stop the current GC and refresh so the STOP GC button disappears for that device
+async function stopGameChangerAndRefresh() {
+  const res = await fetch('/api/gamechanger/stop', { method: 'POST' });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    console.error('[GameChanger] Stop failed', data);
+  }
+  await refreshServerCameras();
+}
+
+// Restart GC for this path using its last saved config (from GCLast in active stream data)
+async function restartGCWithLast(path, lastConfig) {
+  if (!lastConfig) {
+    console.error('No last GC config for', path);
+    return;
+  }
+  const payload = { cameraPath: path };
+  if (lastConfig.fullUrl) {
+    payload.gcFullUrl = lastConfig.fullUrl;
+  } else {
+    payload.gcServer = lastConfig.server || '';
+    payload.gcKey = lastConfig.key || '';
+  }
+  const res = await fetch('/api/gamechanger/start', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    console.error('[GameChanger] Restart failed:', data);
+    alert('Failed to restart GC: ' + (data.error || res.statusText));
+  }
+  await refreshServerCameras();
 }
 
 async function startServerStream(cameraId) {

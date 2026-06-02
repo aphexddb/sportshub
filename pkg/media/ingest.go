@@ -38,22 +38,28 @@ func StartIngestForCamera(cameraID, streamPath string) error {
 
 	// Normalize the dshow input.
 	// The server list sends IDs like "video=Mevo-2GB5D", but sometimes we get just the name.
-	// We want exactly one "video=" prefix.
 	input := cameraID
 	if !strings.HasPrefix(strings.ToLower(input), "video=") {
 		input = "video=" + input
 	}
 
+	videoName := input[6:] // strip "video="
+	// Common pattern for USB webcams and Mevo Start in webcam mode:
+	// video="Mevo-2GB5D"  ->  audio="Microphone (Mevo-2GB5D)"
+	audioName := "Microphone (" + videoName + ")"
+	inputSpec := fmt.Sprintf(`video=%s:audio=%s`, videoName, audioName)
+
 	// Build a solid low-latency command for dshow webcams / Mevo Start.
 	// We deliberately start at 720p30 — this is much more reliable on USB webcams than 1080p.
-	// Video-only for now (audio device names frequently differ).
+	// Include audio using the common "Microphone (Name)" pattern from the device list.
+	// If audio device name differs, the stderr will show the error and we can adjust.
 	args := []string{
 		"-f", "dshow",
 		"-rtbufsize", "200M",
 		"-video_size", "1280x720",
 		"-framerate", "30",
 		"-use_wallclock_as_timestamps", "1",
-		"-i", input,
+		"-i", inputSpec,
 		"-c:v", "libx264",
 		"-preset", "veryfast",
 		"-tune", "zerolatency",
@@ -64,6 +70,9 @@ func StartIngestForCamera(cameraID, streamPath string) error {
 		"-keyint_min", "30",
 		"-pix_fmt", "yuv420p",
 		"-fflags", "+genpts",
+		"-c:a", "aac",
+		"-b:a", "128k",
+		"-ar", "48000",
 		"-f", "flv",
 		"rtmp://127.0.0.1:1935/" + streamPath,
 	}
