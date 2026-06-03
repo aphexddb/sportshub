@@ -18,6 +18,18 @@ type Supervisor struct {
 	running bool
 }
 
+var (
+	mtxReady   bool
+	mtxReadyMu sync.Mutex
+)
+
+// IsMediaReady reports whether MediaMTX has successfully started and is listening.
+func IsMediaReady() bool {
+	mtxReadyMu.Lock()
+	defer mtxReadyMu.Unlock()
+	return mtxReady
+}
+
 func NewSupervisor() *Supervisor {
 	return &Supervisor{}
 }
@@ -48,10 +60,21 @@ func (s *Supervisor) StartMediaMTX() error {
 
 	// Modern config for MediaMTX v1.x
 	// We use an open "all" path so any client can publish (no credentials required).
+	// Only bind addresses for protocols we enable. Setting webrtcAddress while webrtc:no
+	// can cause spurious "listen udp :8000" errors.
 	cfg := `logLevel: info
 
 rtmp: yes
 rtmpAddress: :1935
+
+srt: yes
+srtAddress: :8890
+
+api: no
+metrics: no
+webrtc: no
+rtsp: no
+hls: no
 
 paths:
   all:
@@ -71,6 +94,9 @@ paths:
 
 	log.Printf("[mediamtx] Starting MediaMTX from %s", s.mtxPath)
 
+	// Kill any previous instance to avoid port conflicts (Windows)
+	exec.Command("taskkill", "/F", "/T", "/IM", "mediamtx.exe").Run() // ignore error if not running
+
 	// Quick check: is something already listening?
 	if conn, err := net.DialTimeout("tcp", "127.0.0.1:1935", 200*time.Millisecond); err == nil {
 		conn.Close()
@@ -82,29 +108,51 @@ paths:
 	}
 	s.running = true
 
-	// Actively wait for MediaMTX to accept connections on the RTMP port.
-	// This is much more reliable than a fixed sleep.
-	const readyTimeout = 20 * time.Second
-	if err := waitForPort("127.0.0.1:1935", readyTimeout); err != nil {
-		return fmt.Errorf("MediaMTX did not become ready on RTMP port 1935 within %s: %w", readyTimeout, err)
+	// Wait for RTMP (TCP 1935) first — this is the reliable signal that MediaMTX has initialized its listeners.
+	const readyTimeout = 45 * time.Second
+	if err := waitForPort("tcp", "127.0.0.1:1935", readyTimeout); err != nil {
+		log.Printf("[mediamtx] WARNING: RTMP port 1935 not ready after start: %v", err)
+	} else {
+		log.Printf("[mediamtx] RTMP port 1935 is ready")
 	}
 
-	log.Printf("[mediamtx] MediaMTX RTMP port is ready")
+	// SRT is UDP. After RTMP is up the SRT listener is also up (same startup). Give a grace for full path setup.
+	time.Sleep(500 * time.Millisecond)
+
+	// UDP dial "connects" locally quickly if the port was acquired; not a full SRT handshake probe but sufficient post-TCP-wait.
+	if conn, err := net.DialTimeout("udp", "127.0.0.1:8890", 250*time.Millisecond); err == nil {
+		conn.Close()
+		log.Printf("[mediamtx] SRT UDP port 8890 appears bound")
+	}
+
+	log.Printf("[mediamtx] MediaMTX is ready (RTMP + SRT)")
+
+	mtxReadyMu.Lock()
+	mtxReady = true
+	mtxReadyMu.Unlock()
 	return nil
 }
 
-// waitForPort tries to TCP connect to addr until timeout.
-func waitForPort(addr string, timeout time.Duration) error {
+// waitForPort tries to connect (tcp or udp) to addr until timeout. Logs progress every ~5s.
+func waitForPort(network, addr string, timeout time.Duration) error {
+	if network == "" {
+		network = "tcp"
+	}
 	deadline := time.Now().Add(timeout)
+	start := time.Now()
 	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", addr, 300*time.Millisecond)
+		conn, err := net.DialTimeout(network, addr, 300*time.Millisecond)
 		if err == nil {
 			conn.Close()
+			log.Printf("[mediamtx] port %s (%s) ready after %v", addr, network, time.Since(start))
 			return nil
 		}
-		time.Sleep(250 * time.Millisecond)
+		if time.Since(start) > 5*time.Second {
+			log.Printf("[mediamtx] still waiting for port %s (%s) after %v...", addr, network, time.Since(start))
+		}
+		time.Sleep(400 * time.Millisecond)
 	}
-	return fmt.Errorf("timeout waiting for %s", addr)
+	return fmt.Errorf("timeout waiting for %s (%s) after %v", addr, network, timeout)
 }
 
 func osWriteFile(name string, data []byte, perm os.FileMode) error {

@@ -17,7 +17,7 @@
     <div class="flex items-center justify-between mb-10">
       <div>
         <h1 class="text-5xl font-bold tracking-tighter">sportshub</h1>
-        <p class="text-zinc-400 mt-1">Real camera tester — Windows + Linux</p>
+        <p class="text-zinc-400 mt-1">making sports video easy</p>
       </div>
       <div class="text-right">
         <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-zinc-900 border border-zinc-800 text-sm">
@@ -64,6 +64,8 @@
 
       <div id="server-cameras" class="space-y-3"></div>
       <div class="mt-2 text-xs text-zinc-500">Raw devices from the system are listed below. Click "Start RTMP Stream (local)" to activate a clean path (cam0, cam1...) which can then be used for GameChanger. Active ones show the clean path + "Use for GameChanger" button.</div>
+      <!-- Populated by SSE for always-fresh global + per-device state + live stats -->
+      <div id="global-status" class="mt-2 text-[11px] text-emerald-400 font-mono"></div>
     </div>
 
     <!-- GameChanger Direct Push -->
@@ -317,7 +319,62 @@ function copyDeviceId(id) {
 let serverCameras = [];
 let serverActive = {};
 
-let activeCleanStreams = []; // populated from /api/active-streams
+let activeCleanStreams = []; // still used for a few legacy paths (modals etc.)
+let liveDeviceMap = {}; // rawId -> full DeviceStatus from SSE (includes stats, gc state, etc.)
+
+function applyServerStatus(update) {
+  if (!update || !Array.isArray(update.devices)) return;
+
+  liveDeviceMap = {};
+  update.devices.forEach(d => {
+    liveDeviceMap[d.rawId] = d;
+  });
+
+  // Keep activeCleanStreams in sync for code that still reads it (modals, GC dropdown indirect)
+  activeCleanStreams = update.devices
+    .filter(d => d.path)
+    .map(d => ({
+      rawId: d.rawId,
+      name: d.name,
+      path: d.path,
+      gcActive: !!d.gcActive,
+      gcLast: d.gcLast || null
+    }));
+
+  renderServerCameras();
+  updateGlobalStatusBar(update);
+}
+
+function updateGlobalStatusBar(update) {
+  const el = document.getElementById('global-status');
+  if (!el || !update || !update.global) return;
+  const g = update.global;
+  let txt = `mediaMTX: ${g.mediaMTXReady ? 'ready' : 'starting'} • ${g.activeIngests || 0} live ingest(s)`;
+  if (g.gcActive) {
+    txt += ` • SENDING → ${g.gcPath || g.gcActiveRaw || 'GC'}`;
+  }
+  el.textContent = txt;
+}
+
+function connectStatusSSE() {
+  if (window.__statusSSE) {
+    try { window.__statusSSE.close(); } catch (_) {}
+  }
+  const es = new EventSource('/api/events');
+  window.__statusSSE = es;
+  es.onmessage = (ev) => {
+    try {
+      const data = JSON.parse(ev.data);
+      applyServerStatus(data);
+    } catch (e) {
+      console.error('[SSE] bad payload', e);
+    }
+  };
+  es.onerror = () => {
+    // EventSource auto-retries with backoff; just log once in a while
+    // console.debug('[SSE] transient error (auto-retry)');
+  };
+}
 
 async function refreshServerCameras() {
   const container = document.getElementById('server-cameras');
@@ -343,7 +400,7 @@ function renderServerCameras() {
   const container = document.getElementById('server-cameras');
   container.innerHTML = '';
 
-  // Build map from rawId to clean path info for quick lookup
+  // Build map from rawId to clean path info for quick lookup (from last /active or SSE)
   const rawToActive = {};
   activeCleanStreams.forEach(s => {
     rawToActive[s.rawId] = s;
@@ -357,15 +414,21 @@ function renderServerCameras() {
   // Always show the raw device list from /api/sources so user can start local streams
   serverCameras.forEach(cam => {
     const active = rawToActive[cam.id];
+    const live = liveDeviceMap[cam.id] || null; // full pushed state (stats, live gc, etc)
     const div = document.createElement('div');
     div.className = 'bg-zinc-900 border border-zinc-800 rounded-2xl p-5 flex items-center gap-4';
 
     let actions = '';
-    if (active) {
-      const gcActive = !!active.gcActive;
-      const last = active.gcLast;
-      let gcActions = '';
-      if (gcActive) {
+    let gcActions = '';
+    // Prefer the live pushed state (from SSE) for gcActive / last / stats. Fall back to the activeCleanStreams snapshot.
+    const effPath = (live && live.path) || (active && active.path) || '';
+    const hasCurrentPath = !!effPath;
+    const effGCActive = !!(live ? live.gcActive : (active && active.gcActive));
+    const effGCLast = live ? live.gcLast : (active ? active.gcLast : null);
+
+    if (hasCurrentPath) {
+      gcActions = '';
+      if (effGCActive) {
         gcActions = `
           <span class="text-emerald-400 text-xs font-medium mr-1">SENDING TO GC</span>
           <button onclick="stopGameChangerAndRefresh()" 
@@ -373,31 +436,47 @@ function renderServerCameras() {
             STOP GC
           </button>
         `;
-      } else if (last) {
+      } else if (effGCLast) {
         gcActions = `
-          <button onclick="restartGCWithLast('${active.path}', ${JSON.stringify(last)})" 
+          <button onclick="restartGCWithLast('${effPath}', '${(live && live.rawId) || cam.id || ''}', ${JSON.stringify(effGCLast)})" 
                   class="px-3 py-1 text-xs rounded-2xl bg-amber-600 hover:bg-amber-500 font-medium">
             Restart GC (last)
           </button>
         `;
       } else {
         gcActions = `
-          <button onclick="useForGameChanger('${active.path}', '${cam.id}')" 
+          <button onclick="useForGameChanger('${effPath}', '${cam.id}')" 
                   class="px-3 py-1 text-xs rounded-2xl bg-amber-600 hover:bg-amber-500 font-medium">
             Use for GameChanger
           </button>
         `;
       }
       actions = `
-        <span class="text-emerald-400 text-xs font-medium mr-2">${active.path}</span>
+        <span class="text-emerald-400 text-xs font-medium mr-2">${effPath}</span>
         ${gcActions}
-        <button onclick="showRTMPModalByPath('${active.path}')" 
+        <button onclick="showRTMPModalByPath('${effPath}')" 
                 class="px-3 py-1 text-xs rounded-2xl bg-zinc-800 hover:bg-zinc-700 font-medium">
           Show RTMP + QR
         </button>
-        <button onclick="stopServerStreamByPath('${active.path}')" 
+        <button onclick="stopServerStreamByPath('${effPath}')" 
                 class="px-3 py-1 text-xs rounded-2xl bg-red-600 hover:bg-red-500 font-medium">
           Stop Local
+        </button>
+      `;
+    } else if (effGCLast) {
+      // last-only (synthetic or from push) for a device with no current local path
+      const r = cam.id;
+      gcActions = `
+        <button onclick="restartGCWithLast('', '${r}', ${JSON.stringify(effGCLast)})" 
+                class="px-3 py-1 text-xs rounded-2xl bg-amber-600 hover:bg-amber-500 font-medium">
+          Restart GC (last)
+        </button>
+      `;
+      actions = `
+        ${gcActions}
+        <button onclick="startServerStream('${cam.id}')" 
+               class="px-4 py-1.5 text-xs rounded-2xl bg-white text-black font-semibold hover:bg-zinc-200">
+          Start RTMP Stream (local)
         </button>
       `;
     } else {
@@ -407,10 +486,28 @@ function renderServerCameras() {
       </button>`;
     }
 
+    // Build optional live stats line (ingest + egress when GC pushing)
+    let statsHTML = '';
+    if (live) {
+      const parts = [];
+      if (live.stats && (live.stats.fps || live.stats.bitrate)) {
+        const fps = live.stats.fps ? live.stats.fps.toFixed(1) : '?';
+        parts.push(`in:${fps}fps ${live.stats.bitrate || ''}`);
+      }
+      if (live.egressStats && (live.egressStats.fps || live.egressStats.bitrate)) {
+        const efps = live.egressStats.fps ? live.egressStats.fps.toFixed(1) : '?';
+        parts.push(`out:${efps}fps ${live.egressStats.bitrate || ''}`);
+      }
+      if (parts.length) {
+        statsHTML = `<div class="text-[10px] text-emerald-400/90 font-mono mt-0.5">${parts.join(' | ')}</div>`;
+      }
+    }
+
     div.innerHTML = `
       <div class="flex-1 min-w-0">
         <div class="font-semibold">${cam.name}</div>
         <div class="text-xs text-zinc-500 font-mono">${cam.id}</div>
+        ${statsHTML}
       </div>
       <div class="flex items-center gap-2 text-right">${actions}</div>
     `;
@@ -482,19 +579,34 @@ async function stopGameChangerAndRefresh() {
   await refreshServerCameras();
 }
 
-// Restart GC for this path using its last saved config (from GCLast in active stream data)
-async function restartGCWithLast(path, lastConfig) {
+// Restart GC for this path (or raw device) using its last saved config.
+// Supports calls with (path, rawId, lastConfig) for synthetic last-only rows, and falls back
+// to lastConfig.rawId when restarting a remembered device that has no current clean path.
+async function restartGCWithLast(path, rawId, lastConfig) {
+  if (rawId && typeof rawId === 'object') {
+    // Back-compat: old call style restartGCWithLast(path, lastConfig)
+    lastConfig = rawId;
+    rawId = null;
+  }
   if (!lastConfig) {
-    console.error('No last GC config for', path);
+    console.error('No last GC config for', path || rawId);
     return;
   }
-  const payload = { cameraPath: path };
+  // Prefer a real rawId (stable device) for restart when we have it. Backend will on-demand
+  // assign a fresh camN if needed. This works even for stale "cam0" from previous run.
+  let cameraPath = (path && path.length > 0) ? path : (rawId || (lastConfig && lastConfig.rawId) || '');
+  if (!cameraPath) {
+    console.error('restartGCWithLast: no cameraPath or rawId available');
+    return;
+  }
+  const payload = { cameraPath: cameraPath };
   if (lastConfig.fullUrl) {
     payload.gcFullUrl = lastConfig.fullUrl;
   } else {
     payload.gcServer = lastConfig.server || '';
     payload.gcKey = lastConfig.key || '';
   }
+  console.log('[GameChanger] Restart last payload:', payload);
   const res = await fetch('/api/gamechanger/start', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -503,7 +615,7 @@ async function restartGCWithLast(path, lastConfig) {
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     console.error('[GameChanger] Restart failed:', data);
-    alert('Failed to restart GC: ' + (data.error || res.statusText));
+    // no alert per project rule; surface in console + status if present
   }
   await refreshServerCameras();
 }
@@ -599,19 +711,28 @@ async function refreshGameChangerCameras() {
   const select = document.getElementById('gc-camera');
   if (!select) return;
 
+  if (!serverCameras || serverCameras.length === 0) {
+    try {
+      const res = await fetch('/api/sources');
+      serverCameras = await res.json();
+    } catch (e) {
+      console.error('Failed to load sources for GC dropdown', e);
+    }
+  }
+
   select.innerHTML = '';
 
-  if (activeCleanStreams && activeCleanStreams.length > 0) {
-    activeCleanStreams.forEach(s => {
+  if (serverCameras && serverCameras.length > 0) {
+    serverCameras.forEach(cam => {
       const opt = document.createElement('option');
-      opt.value = s.path;                    // clean path (what backend expects for pulling from MediaMTX)
-      opt.textContent = `${s.path} — ${s.name || s.rawId}`;
+      opt.value = cam.id;  // raw ID; backend will treat as raw for on-demand capture or lookup if it's a path
+      opt.textContent = cam.name;
       select.appendChild(opt);
     });
   } else {
     const opt = document.createElement('option');
     opt.value = '';
-    opt.textContent = '(no active local streams - start one in Server Cameras first)';
+    opt.textContent = '(no devices - make sure ffmpeg is working and refresh)';
     opt.disabled = true;
     select.appendChild(opt);
   }
@@ -628,10 +749,10 @@ async function startGameChanger() {
   const server = serverEl ? serverEl.value.trim() : '';
   const key = keyEl ? keyEl.value.trim() : '';
 
-  if (!cameraPath || cameraPath.includes('no active')) {
-    console.error('[GameChanger] No valid clean path selected for GameChanger. Start a local stream first.');
+  if (!cameraPath) {
+    console.error('[GameChanger] No camera selected for GameChanger.');
     if (statusEl) {
-      statusEl.textContent = 'No active local stream selected';
+      statusEl.textContent = 'No camera selected';
       statusEl.className = 'text-sm text-red-400 ml-2';
     }
     return;
@@ -740,6 +861,10 @@ setTimeout(() => {
 // Boot
 refreshServerCameras();
 updateGameChangerStatus();
+
+// Connect to realtime SSE for global/device status + live streaming stats.
+// After this the UI will receive push updates on every start/stop/GC change/stats tick.
+connectStatusSSE();
 
 // Make scan available on load
 setTimeout(() => {

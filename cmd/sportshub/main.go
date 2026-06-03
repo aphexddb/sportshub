@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -52,6 +54,7 @@ type GCConfig struct {
 	FullURL string `json:"fullUrl,omitempty"`
 	Server  string `json:"server,omitempty"`
 	Key     string `json:"key,omitempty"`
+	RawID   string `json:"rawId,omitempty"`
 }
 
 type ServerStreamInfo struct {
@@ -62,7 +65,368 @@ type ServerStreamInfo struct {
 	GCLast   *GCConfig `json:"gcLast,omitempty"`
 }
 
+type demand struct {
+	local bool
+	gc    bool
+}
+
+var demands = make(map[string]*demand) // raw camera ID -> demand
+
+func getDemand(raw string) *demand {
+	if d, ok := demands[raw]; ok {
+		return d
+	}
+	d := &demand{}
+	demands[raw] = d
+	return d
+}
+
+func ensureCapture(rawID string) string {
+	d := getDemand(rawID)
+	if !d.local && !d.gc {
+		return ""
+	}
+	// find or assign path
+	mu.Lock()
+	path := ""
+	for p, info := range serverStreams {
+		if info.RawID == rawID {
+			path = p
+			break
+		}
+	}
+	if path == "" {
+		path = fmt.Sprintf("cam%d", nextCamIndex)
+		nextCamIndex++
+		serverStreams[path] = ServerStreamInfo{
+			RawID: rawID,
+			Name:  rawID,
+			Path:  path,
+		}
+	}
+	mu.Unlock()
+
+	if !isCaptureRunning(rawID) {
+		go func() {
+			if err := media.StartIngestForCamera(rawID, path); err != nil {
+				log.Printf("[capture] start ingest failed for %s: %v", rawID, err)
+			}
+		}()
+	}
+	return path
+}
+
+func cleanupCapture(rawID string) {
+	d := getDemand(rawID)
+	if d.local || d.gc {
+		return
+	}
+	media.StopIngest(rawID)
+	mu.Lock()
+	for p, info := range serverStreams {
+		if info.RawID == rawID {
+			delete(serverStreams, p)
+			break
+		}
+	}
+	mu.Unlock()
+}
+
+func setLocalDemand(rawID string, on bool) {
+	d := getDemand(rawID)
+	was := d.local
+	d.local = on
+	if on && !was {
+		ensureCapture(rawID)
+	} else if !on && was {
+		cleanupCapture(rawID)
+	}
+	broadcastStatus()
+}
+
+func setGCDemand(rawID string, on bool) {
+	d := getDemand(rawID)
+	was := d.gc
+	d.gc = on
+	if on && !was {
+		ensureCapture(rawID)
+	} else if !on && was {
+		cleanupCapture(rawID)
+	}
+	broadcastStatus()
+}
+
+func isCaptureRunning(rawID string) bool {
+	m := media.GetActiveIngests()
+	return m[rawID]
+}
+
+// killOldProcesses aggressively terminates any previous sportshub.exe (except self),
+// mediamtx.exe, and any processes holding our key ports (1935/8890/8000).
+// This ensures a fresh run never sees "already listening" or long waits for ports
+// that belonged to a prior (crashed or still-running) instance.
+func killOldProcesses() {
+	if runtime.GOOS != "windows" {
+		return
+	}
+	log.Printf("[startup] Cleaning up previous sportshub/mediamtx instances and freeing ports...")
+	ourPID := os.Getpid()
+
+	// 1. Nuke mediamtx (and its children)
+	exec.Command("taskkill", "/F", "/T", "/IM", "mediamtx.exe").Run()
+
+	// 2. Kill other sportshub.exe processes (exclude our PID)
+	psKill := fmt.Sprintf(`Get-Process -Name sportshub -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne %d } | Stop-Process -Force -ErrorAction SilentlyContinue`, ourPID)
+	exec.Command("powershell", "-NoProfile", "-Command", psKill).Run()
+
+	// 3. Kill owners of the specific ports we need (TCP listeners + UDP endpoints)
+	ports := []int{1935, 8890, 8000}
+	for _, p := range ports {
+		psTCP := fmt.Sprintf(`Get-NetTCPConnection -LocalPort %d -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique | Where-Object { $_ -ne %d } | Stop-Process -Force -ErrorAction SilentlyContinue`, p, ourPID)
+		exec.Command("powershell", "-NoProfile", "-Command", psTCP).Run()
+
+		psUDP := fmt.Sprintf(`Get-NetUDPEndpoint -LocalPort %d -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique | Where-Object { $_ -ne %d } | Stop-Process -Force -ErrorAction SilentlyContinue`, p, ourPID)
+		exec.Command("powershell", "-NoProfile", "-Command", psUDP).Run()
+	}
+
+	time.Sleep(700 * time.Millisecond)
+	log.Printf("[startup] Port/process cleanup complete (our pid=%d). 1935/8890 should be free for MediaMTX.", ourPID)
+}
+
+// getStateDir returns the same bin dir used for mediamtx/ffmpeg so we can store small state (last GC configs).
+func getStateDir() (string, error) {
+	appData, err := os.UserCacheDir()
+	if err != nil {
+		appData = os.TempDir()
+	}
+	dir := filepath.Join(appData, "sportshub", "bin")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+func loadGCLastConfigs() {
+	dir, err := getStateDir()
+	if err != nil {
+		return
+	}
+	path := filepath.Join(dir, "gc_lasts.json")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var m map[string]GCConfig
+	if json.Unmarshal(b, &m) == nil {
+		for k, v := range m {
+			gcLastConfigs[k] = v
+		}
+		log.Printf("[gamechanger] loaded %d last GC config(s) from disk", len(m))
+	}
+}
+
+func saveGCLastConfigs() {
+	dir, err := getStateDir()
+	if err != nil {
+		return
+	}
+	path := filepath.Join(dir, "gc_lasts.json")
+	b, _ := json.MarshalIndent(gcLastConfigs, "", "  ")
+	_ = os.WriteFile(path, b, 0644)
+}
+
+// ---------------- SSE realtime status hub ----------------
+
+type eventHub struct {
+	mu   sync.Mutex
+	subs map[chan string]struct{}
+}
+
+var hub = &eventHub{subs: make(map[chan string]struct{})}
+
+func (h *eventHub) subscribe() chan string {
+	ch := make(chan string, 8)
+	h.mu.Lock()
+	h.subs[ch] = struct{}{}
+	h.mu.Unlock()
+	return ch
+}
+
+func (h *eventHub) unsubscribe(ch chan string) {
+	h.mu.Lock()
+	delete(h.subs, ch)
+	h.mu.Unlock()
+	close(ch)
+}
+
+func (h *eventHub) broadcast(v any) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return
+	}
+	msg := "data: " + string(b) + "\n\n"
+	h.mu.Lock()
+	for ch := range h.subs {
+		select {
+		case ch <- msg:
+		default:
+			// drop on slow client
+		}
+	}
+	h.mu.Unlock()
+}
+
+// StatusSnapshot is the complete view pushed over SSE.
+type StatusSnapshot struct {
+	Ts      time.Time      `json:"ts"`
+	Global  GlobalStatus   `json:"global"`
+	Devices []DeviceStatus `json:"devices"`
+}
+
+type GlobalStatus struct {
+	MediaMTXReady bool   `json:"mediaMTXReady"`
+	ActiveIngests int    `json:"activeIngests"`
+	GCActive      bool   `json:"gcActive"`
+	GCPath        string `json:"gcPath,omitempty"`
+	GCActiveRaw   string `json:"gcActiveRaw,omitempty"`
+}
+
+type DeviceStatus struct {
+	RawID       string            `json:"rawId"`
+	Name        string            `json:"name"`
+	Path        string            `json:"path,omitempty"`
+	LocalActive bool              `json:"localActive"`
+	GCActive    bool              `json:"gcActive"`
+	GCLast      *GCConfig         `json:"gcLast,omitempty"`
+	Stats       *media.StreamStats `json:"stats,omitempty"`
+	EgressStats *media.StreamStats `json:"egressStats,omitempty"`
+}
+
+var gcEgress media.StreamStats // egress stats for the active GC restream (protected by gcMu when written)
+
+func broadcastStatus() {
+	snap := buildStatusSnapshot()
+	hub.broadcast(snap)
+}
+
+func buildStatusSnapshot() StatusSnapshot {
+	snap := StatusSnapshot{Ts: time.Now()}
+
+	activeIngests := media.GetActiveIngests()
+	ingestStats := media.GetStreamStats()
+
+	mu.Lock()
+	gcMu.Lock()
+	defer gcMu.Unlock()
+	defer mu.Unlock()
+
+	snap.Global.MediaMTXReady = media.IsMediaReady()
+	snap.Global.ActiveIngests = len(activeIngests)
+	snap.Global.GCActive = gcActive
+	snap.Global.GCPath = gcActivePath
+
+	seen := map[string]bool{}
+	for path, info := range serverStreams {
+		ds := DeviceStatus{
+			RawID: info.RawID,
+			Name:  info.Name,
+			Path:  path,
+		}
+		dmd := getDemand(info.RawID)
+		ds.LocalActive = dmd.local
+		if path == gcActivePath {
+			ds.GCActive = true
+			snap.Global.GCActiveRaw = info.RawID
+		}
+		if last, ok := gcLastConfigs[info.RawID]; ok {
+			ds.GCLast = &last
+		}
+		if st, ok := ingestStats[info.RawID]; ok && (st.FPS != 0 || st.Bitrate != "") {
+			cp := st
+			ds.Stats = &cp
+		}
+		if ds.GCActive && (gcEgress.FPS != 0 || gcEgress.Bitrate != "") {
+			cp := gcEgress
+			ds.EgressStats = &cp
+		}
+		snap.Devices = append(snap.Devices, ds)
+		seen[info.RawID] = true
+	}
+
+	// Include remembered last-only devices (for "Restart GC (last)" on idle rows after restart of the exe)
+	for raw, last := range gcLastConfigs {
+		if seen[raw] {
+			continue
+		}
+		ds := DeviceStatus{
+			RawID:    raw,
+			Name:     raw,
+			GCActive: false,
+			GCLast:   &last,
+		}
+		dmd := getDemand(raw)
+		ds.LocalActive = dmd.local
+		if st, ok := ingestStats[raw]; ok && (st.FPS != 0 || st.Bitrate != "") {
+			cp := st
+			ds.Stats = &cp
+		}
+		snap.Devices = append(snap.Devices, ds)
+	}
+
+	return snap
+}
+
+// eventsHandler is the SSE endpoint. Sends full snapshot on connect, then incremental updates.
+func eventsHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache, no-transform")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no") // helpful behind some proxies
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "SSE not supported", http.StatusInternalServerError)
+		return
+	}
+
+	log.Printf("[sse] client connected from %s", r.RemoteAddr)
+	ch := hub.subscribe()
+	defer hub.unsubscribe(ch)
+
+	// Initial snapshot so the client is immediately up-to-date.
+	snap := buildStatusSnapshot()
+	b, _ := json.Marshal(snap)
+	fmt.Fprintf(w, "data: %s\n\n", b)
+	flusher.Flush()
+
+	ctx := r.Context()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case msg, ok := <-ch:
+			if !ok {
+				return
+			}
+			if _, err := fmt.Fprint(w, msg); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
+}
+
 func main() {
+	killOldProcesses()
+	loadGCLastConfigs()
+
+	// Wire notifier from media layer (ingest start/stop + live fps/bitrate stats) into our SSE broadcaster.
+	media.SetNotifier(func(event string, payload any) {
+		if event == "ingest-started" || event == "ingest-stopped" || event == "stats" || event == "gc-stats" {
+			go broadcastStatus()
+		}
+	})
+
 	// Serve the dashboard (real file - we will embed later)
 	http.Handle("/", http.FileServer(http.Dir("web/dist")))
 
@@ -79,11 +443,37 @@ func main() {
 	http.HandleFunc("/api/gamechanger/status", gameChangerStatusHandler)
 	http.HandleFunc("/api/active-streams", activeStreamsHandler)
 
+	// SSE realtime status (global + per device + live stats). UI connects once and stays fresh.
+	http.HandleFunc("/api/events", eventsHandler)
+
 	port := ":8080"
 	log.Printf("=== SportsHub Windows Spike ===")
 	log.Printf("Open http://localhost%s", port)
 	log.Printf("Browser Live Preview (top section) = browser getUserMedia")
 	log.Printf("Server RTMP list (bottom) = what our ffmpeg can see for real RTMP streaming")
+
+	// Pre-start MediaMTX early so it's ready when first ingest or GC is requested.
+	// This avoids long waits/timeouts on first use.
+	go func() {
+		if err := media.InitMedia(); err != nil {
+			log.Printf("[media] pre-init MediaMTX warning: %v", err)
+		} else {
+			// Push an initial status snapshot once MTX is up.
+			go broadcastStatus()
+		}
+	}()
+
+	// Light ticker so live stats (fps/bitrate) keep flowing to UI even during quiet periods of ffmpeg output,
+	// and global view stays fresh while anything is streaming.
+	go func() {
+		t := time.NewTicker(1500 * time.Millisecond)
+		defer t.Stop()
+		for range t.C {
+			if len(media.GetActiveIngests()) > 0 || gcActive {
+				broadcastStatus()
+			}
+		}
+	}()
 
 	if err := http.ListenAndServe(port, nil); err != nil {
 		log.Fatal(err)
@@ -128,22 +518,13 @@ func startStreamHandler(w http.ResponseWriter, r *http.Request) {
 
 	serverStreams[streamPath] = ServerStreamInfo{
 		RawID: req.CameraID,
-		Name:  req.CameraID, // TODO: could store friendly name if we had it
+		Name:  req.CameraID,
 		Path:  streamPath,
 	}
 
 	mu.Unlock()
 
-	// Start the real ingest in background (MediaMTX + ffmpeg dshow → RTMP)
-	go func() {
-		if err := media.StartIngestForCamera(req.CameraID, streamPath); err != nil {
-			log.Printf("[server] ============================================")
-			log.Printf("[server] Ingest FAILED for device %q → %s", req.CameraID, streamPath)
-			log.Printf("[server] Error: %v", err)
-			log.Printf("[server] Common causes: MediaMTX not ready, device in use by browser, wrong resolution for camera")
-			log.Printf("[server] ============================================")
-		}
-	}()
+	setLocalDemand(req.CameraID, true)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
@@ -170,7 +551,7 @@ func stopStreamHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	mu.Unlock()
 
-	media.StopIngest(req.CameraID)
+	setLocalDemand(req.CameraID, false)
 
 	// If this path was the one sending to GC, stop the GC push too
 	if stoppedPath != "" && stoppedPath == gcActivePath {
@@ -264,23 +645,36 @@ func gameChangerStartHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate that this clean path is currently being ingested locally
+	// Find rawID: if cameraPath is a clean path (e.g. "cam0" from old last), lookup its raw.
+	// Also accept raw directly (from "Use for GameChanger" or restart last sending raw).
+	rawID := req.CameraPath
 	mu.Lock()
-	_, isActive := serverStreams[req.CameraPath]
+	for p, info := range serverStreams {
+		if p == req.CameraPath || info.RawID == req.CameraPath {
+			rawID = info.RawID
+			break
+		}
+	}
 	available := []string{}
 	for k := range serverStreams {
 		available = append(available, k)
 	}
 	mu.Unlock()
 
-	if !isActive {
-		log.Printf("[gamechanger] 400: no active local stream for cameraPath=%q. Available clean paths: %v", req.CameraPath, available)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{
-			"error": fmt.Sprintf("No active local stream for path %q. Start the local RTMP stream first (using the Server Cameras section). Available: %v", req.CameraPath, available),
-		})
-		return
+	setGCDemand(rawID, true)
+	path := ensureCapture(rawID)
+	if path == "" {
+		path = req.CameraPath
+	}
+
+	// Wait for the local ingest to actually be running and publishing before starting the pull.
+	// This avoids the race where the GC restream tries to connect before the publisher is up.
+	log.Printf("[gamechanger] waiting for local ingest for %s to be active...", rawID)
+	for i := 0; i < 60; i++ { // up to 30s
+		if media.GetActiveIngests()[rawID] {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
 	}
 
 	gcMu.Lock()
@@ -301,21 +695,30 @@ func gameChangerStartHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Build a GameChanger-friendly ffmpeg command.
-	// Pull clean feed from local MediaMTX and re-encode with settings that GameChanger likes.
-	// 720p30 @ ~5Mbps is very reliable for GC. Use 1080p if you have excellent upload.
-	source := fmt.Sprintf("rtmp://127.0.0.1:1935/%s", req.CameraPath)
+	// Pull clean feed from local MediaMTX (now 1080p30 from ingest) and re-encode with settings that GameChanger wants.
+	// Force 1080p output + 6Mbps target (GameChanger prefers 1080p for the app).
+	source := fmt.Sprintf("srt://127.0.0.1:8890?streamid=read:%s&latency=100000&mode=caller", path)
 
 	args := []string{
+		"-fflags", "nobuffer",
+		"-flags", "low_delay",
+		// These must be high enough for ffmpeg to parse H.264 SPS/PPS + resolution from
+		// the mpegts over SRT. Too low (the old 32/0) causes "unspecified size" / "not enough frames"
+		// and the video stream gets dropped — only audio reaches GameChanger.
+		"-probesize", "500000",
+		"-analyzeduration", "1000000",
+		"-err_detect", "ignore_err",
 		"-i", source,
+		"-vf", "scale=1920:1080",
 		"-c:v", "libx264",
 		"-preset", "veryfast",
 		"-profile:v", "high",
 		"-level", "4.1",
-		"-b:v", "5000k",
-		"-maxrate", "5500k",
-		"-bufsize", "7000k",
-		"-g", "60",           // 2 second keyframes at 30fps (GameChanger likes this)
-		"-keyint_min", "60",
+		"-b:v", "6000k",
+		"-maxrate", "7000k",
+		"-bufsize", "9000k",
+		"-g", "30",           // lower GOP for lower latency (1s at 30fps); GC accepts it
+		"-keyint_min", "30",
 		"-sc_threshold", "0",
 		"-pix_fmt", "yuv420p",
 		"-c:a", "aac",
@@ -338,7 +741,7 @@ func gameChangerStartHandler(w http.ResponseWriter, r *http.Request) {
 	cmd := exec.Command(ffmpegPath, args...)
 	cmd.Stdout = nil
 
-	// Capture stderr for diagnostics, similar to local ingest
+	// Capture stderr for diagnostics + live egress stats (to GC)
 	stderrPipe, _ := cmd.StderrPipe()
 	go func() {
 		if stderrPipe != nil {
@@ -346,7 +749,26 @@ func gameChangerStartHandler(w http.ResponseWriter, r *http.Request) {
 			for {
 				n, err := stderrPipe.Read(buf)
 				if n > 0 {
-					log.Printf("[gamechanger ffmpeg stderr] %s", string(buf[:n]))
+					s := string(buf[:n])
+					log.Printf("[gamechanger ffmpeg stderr] %s", s)
+					fps, br, spd, fr := media.ParseFFmpegProgressLine(s)
+					if fps != 0 || br != "" || fr != 0 {
+						gcMu.Lock()
+						if fps != 0 {
+							gcEgress.FPS = fps
+						}
+						if br != "" {
+							gcEgress.Bitrate = br
+						}
+						if spd != "" {
+							gcEgress.Speed = spd
+						}
+						if fr != 0 {
+							gcEgress.Frames = fr
+						}
+						gcMu.Unlock()
+						broadcastStatus()
+					}
 				}
 				if err != nil {
 					break
@@ -363,17 +785,29 @@ func gameChangerStartHandler(w http.ResponseWriter, r *http.Request) {
 
 	gcCmd = cmd
 	gcActive = true
-	gcActivePath = req.CameraPath
+	// Always store the *clean* path we are actually publishing under (assigned by ensureCapture).
+	// This keeps comparisons in stop handlers and activeStreams consistent.
+	gcActivePath = path
 	gcCamera = req.CameraPath
 
-	// store last config for this path for easy restart
-	gcLastConfigs[req.CameraPath] = GCConfig{
+	// store last config *by the stable raw device ID* so restart works across sportshub restarts
+	// and we can show "Restart GC (last)" for a device even if it has no current local stream.
+	gcLastConfigs[rawID] = GCConfig{
 		FullURL: req.GcFullUrl,
 		Server:  req.GcServer,
 		Key:     req.GcKey,
+		RawID:   rawID,
 	}
+	saveGCLastConfigs()
 
-	log.Printf("[gamechanger] Started push for %s → %s (fullUrl=%v)", req.CameraPath, dest, req.GcFullUrl != "")
+	log.Printf("[gamechanger] Started push for %s (clean=%s) → %s (fullUrl=%v)", req.CameraPath, path, dest, req.GcFullUrl != "")
+
+	// zero previous egress stats for the new push
+	gcMu.Lock()
+	gcEgress = media.StreamStats{}
+	gcMu.Unlock()
+
+	broadcastStatus()
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
@@ -394,11 +828,30 @@ func gameChangerStopHandler(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[gamechanger] Stopping stream for %s", gcCamera)
 
+	raw := ""
+	mu.Lock()
+	for p, info := range serverStreams {
+		if p == gcActivePath {
+			raw = info.RawID
+			break
+		}
+	}
+	mu.Unlock()
+	if raw != "" {
+		setGCDemand(raw, false)
+	}
+
 	_ = gcCmd.Process.Kill()
 	gcCmd = nil
 	gcActive = false
 	gcActivePath = ""
 	gcCamera = ""
+
+	gcMu.Lock()
+	gcEgress = media.StreamStats{}
+	gcMu.Unlock()
+
+	broadcastStatus()
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"ok": true})
@@ -423,6 +876,7 @@ func activeStreamsHandler(w http.ResponseWriter, r *http.Request) {
 	defer mu.Unlock()
 
 	result := []ServerStreamInfo{}
+	seenRaws := map[string]bool{}
 	for path, info := range serverStreams {
 		as := ServerStreamInfo{
 			RawID: info.RawID,
@@ -432,8 +886,27 @@ func activeStreamsHandler(w http.ResponseWriter, r *http.Request) {
 		if path == gcActivePath {
 			as.GCActive = true
 		}
-		if last, ok := gcLastConfigs[path]; ok {
-			as.GCLast = &last
+		if last, ok := gcLastConfigs[info.RawID]; ok {
+			lastCopy := last
+			as.GCLast = &lastCopy
+		}
+		result = append(result, as)
+		seenRaws[info.RawID] = true
+	}
+
+	// Also surface remembered last configs for raw devices that have no current serverStream entry
+	// (e.g. after a full STOP that cleaned the local path, or after sportshub.exe restart).
+	// This lets the UI render a "Restart GC (last)" button on the raw device row.
+	for raw, last := range gcLastConfigs {
+		if seenRaws[raw] {
+			continue
+		}
+		as := ServerStreamInfo{
+			RawID:    raw,
+			Name:     raw,
+			Path:     "",
+			GCActive: false,
+			GCLast:   &last,
 		}
 		result = append(result, as)
 	}
