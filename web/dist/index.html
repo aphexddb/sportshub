@@ -63,7 +63,7 @@
       </div>
 
       <div id="server-cameras" class="space-y-3"></div>
-      <div class="mt-2 text-xs text-zinc-500">Raw devices from the system are listed below. Click "Start RTMP Stream (local)" to activate a clean path (cam0, cam1...) which can then be used for GameChanger. Active ones show the clean path + "Use for GameChanger" button.</div>
+      <div class="mt-2 text-xs text-zinc-500">Raw devices from the system are listed below. Click "Start RTMP Stream (local)" to activate a clean path (cam0, cam1...) which can then be used for GameChanger. Active ones show the clean path + "Use for GameChanger" button. Use "Show Viewer + QR" to get a phone-friendly web link/QR.</div>
       <!-- Populated by SSE for always-fresh global + per-device state + live stats -->
       <div id="global-status" class="mt-2 text-[11px] text-emerald-400 font-mono"></div>
     </div>
@@ -126,7 +126,7 @@
 
     <div class="text-[10px] text-zinc-600 border-t border-zinc-900 pt-4">
       "Start RTMP Stream" uses the Go backend + MediaMTX. It will download MediaMTX + ffmpeg on first use (~150MB).
-      The resulting RTMP URL (e.g. rtmp://127.0.0.1:1935/cam0) can be used in VLC, OBS, or GameChanger.
+      Use the "Show Viewer + QR" button for a browser-friendly link (http://your-lan-ip:8080/watch/cam0) that works great when scanned on a phone.
     </div>
   </div>
 
@@ -322,8 +322,33 @@ let serverActive = {};
 let activeCleanStreams = []; // still used for a few legacy paths (modals etc.)
 let liveDeviceMap = {}; // rawId -> full DeviceStatus from SSE (includes stats, gc state, etc.)
 
+// Server addresses for building viewer URLs and QR codes that work from phones.
+let serverConfig = { host: '127.0.0.1', port: 8080, rtmpPort: 1935, hlsPort: 8888 };
+
+async function loadServerConfig() {
+  try {
+    const res = await fetch('/api/config');
+    if (res.ok) {
+      serverConfig = await res.json();
+    }
+  } catch (e) {
+    // keep defaults
+  }
+}
+
 function applyServerStatus(update) {
-  if (!update || !Array.isArray(update.devices)) return;
+  if (!update || !Array.isArray(update.devices)) {
+    console.warn('[State] received invalid server status update', update);
+    return;
+  }
+
+  console.log('[State] applying state change from server', {
+    ts: update.ts,
+    activeIngests: update.global ? update.global.activeIngests : 0,
+    gcActive: !!(update.global && update.global.gcActive),
+    gcPath: update.global ? update.global.gcPath : null,
+    deviceCount: update.devices.length
+  });
 
   liveDeviceMap = {};
   update.devices.forEach(d => {
@@ -343,6 +368,23 @@ function applyServerStatus(update) {
 
   renderServerCameras();
   updateGlobalStatusBar(update);
+
+  // Keep the GameChanger form's #gc-status in sync with server state changes (SSE).
+  // This ensures that after starting GC (or when it ends via remote close), the "Starting..."/"Active"/"Idle"
+  // text next to the buttons reflects reality even if the direct response path or poll hasn't fired yet.
+  const gcStatusEl = document.getElementById('gc-status');
+  if (gcStatusEl && update.global) {
+    if (update.global.gcActive) {
+      gcStatusEl.textContent = `Active → ${update.global.gcPath || update.global.gcActiveRaw || 'GC'}`;
+      gcStatusEl.className = 'text-sm text-emerald-400 ml-2';
+    } else if (gcStatusEl.textContent.indexOf('Starting...') === -1 &&
+               gcStatusEl.textContent.indexOf('Failed:') === -1 &&
+               gcStatusEl.textContent.indexOf('Network Error') === -1) {
+      // Only auto-idle if not in a transient user-facing state from the direct start/stop click handlers.
+      gcStatusEl.textContent = 'Idle';
+      gcStatusEl.className = 'text-sm text-zinc-400 ml-2';
+    }
+  }
 }
 
 function updateGlobalStatusBar(update) {
@@ -360,19 +402,28 @@ function connectStatusSSE() {
   if (window.__statusSSE) {
     try { window.__statusSSE.close(); } catch (_) {}
   }
+  console.log('[SSE] connecting to /api/events for realtime state...');
   const es = new EventSource('/api/events');
   window.__statusSSE = es;
+  es.onopen = () => {
+    console.log('[SSE] connected to /api/events (realtime state updates active)');
+  };
   es.onmessage = (ev) => {
     try {
       const data = JSON.parse(ev.data);
+      console.log('[SSE] state change event received', {
+        ts: data.ts,
+        global: data.global,
+        devices: (data.devices || []).length,
+        gcActive: !!(data.global && data.global.gcActive)
+      });
       applyServerStatus(data);
     } catch (e) {
       console.error('[SSE] bad payload', e);
     }
   };
-  es.onerror = () => {
-    // EventSource auto-retries with backoff; just log once in a while
-    // console.debug('[SSE] transient error (auto-retry)');
+  es.onerror = (e) => {
+    console.warn('[SSE] connection error (EventSource will auto-retry)', e);
   };
 }
 
@@ -399,6 +450,12 @@ async function refreshServerCameras() {
 function renderServerCameras() {
   const container = document.getElementById('server-cameras');
   container.innerHTML = '';
+
+  console.log('[UI] renderServerCameras (state-driven)', {
+    rawDevices: (serverCameras || []).length,
+    activePaths: activeCleanStreams.length,
+    liveStates: Object.keys(liveDeviceMap).length
+  });
 
   // Build map from rawId to clean path info for quick lookup (from last /active or SSE)
   const rawToActive = {};
@@ -456,7 +513,7 @@ function renderServerCameras() {
         ${gcActions}
         <button onclick="showRTMPModalByPath('${effPath}')" 
                 class="px-3 py-1 text-xs rounded-2xl bg-zinc-800 hover:bg-zinc-700 font-medium">
-          Show RTMP + QR
+          Show Viewer + QR
         </button>
         <button onclick="stopServerStreamByPath('${effPath}')" 
                 class="px-3 py-1 text-xs rounded-2xl bg-red-600 hover:bg-red-500 font-medium">
@@ -517,6 +574,7 @@ function renderServerCameras() {
 
 // Helper to start local RTMP from the old device list (kept for compatibility)
 async function startServerStream(cameraId) {
+  console.log('[LocalStream] starting local RTMP stream', { cameraId });
   const res = await fetch('/api/stream/start', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -525,27 +583,35 @@ async function startServerStream(cameraId) {
   const data = await res.json();
   if (data.ok) {
     serverActive[cameraId] = data.stream;
+    console.log('[LocalStream] local stream started', data.stream);
     await refreshServerCameras();
   } else {
+    console.error('[LocalStream] failed to start', data);
     alert('Failed: ' + (data.error || 'unknown'));
   }
 }
 
 async function stopServerStreamByPath(path) {
+  console.log('[LocalStream] stopping local stream by path', { path });
   // Find the raw camera ID for this path
   const info = activeCleanStreams.find(s => s.path === path);
-  if (!info) return alert('Could not find stream');
+  if (!info) {
+    console.error('[LocalStream] could not find stream for path', path);
+    return alert('Could not find stream');
+  }
 
   await fetch('/api/stream/stop', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ cameraId: info.rawId })
   });
+  console.log('[LocalStream] local stream stopped for path', path);
   await refreshServerCameras();
 }
 
 // Called from the new "Use for GameChanger" button
 function useForGameChanger(cleanPath, rawId) {
+  console.log('[GameChanger] Use for GameChanger clicked', { cleanPath, rawId });
   // Pre-fill the GameChanger form
   const select = document.getElementById('gc-camera');
   if (select) {
@@ -571,11 +637,13 @@ function useForGameChanger(cleanPath, rawId) {
 
 // Stop the current GC and refresh so the STOP GC button disappears for that device
 async function stopGameChangerAndRefresh() {
+  console.log('[GameChanger] stopping GC push from UI');
   const res = await fetch('/api/gamechanger/stop', { method: 'POST' });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     console.error('[GameChanger] Stop failed', data);
   }
+  console.log('[GameChanger] GC stop requested, refreshing state');
   await refreshServerCameras();
 }
 
@@ -621,6 +689,7 @@ async function restartGCWithLast(path, rawId, lastConfig) {
 }
 
 async function startServerStream(cameraId) {
+  console.log('[LocalStream] starting local RTMP stream', { cameraId });
   const res = await fetch('/api/stream/start', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -630,21 +699,25 @@ async function startServerStream(cameraId) {
 
   if (data.ok) {
     serverActive[cameraId] = data.stream;
+    console.log('[LocalStream] local stream started successfully', data.stream);
     await refreshServerCameras();  // this will refetch active and re-render with clean paths + buttons
     // Optionally show the modal for the new stream - but since we don't have the exact path here easily, skip for now
-    // The user can use the "Show RTMP + QR" button after refresh
+    // The user can use the "Show Viewer + QR" button after refresh
   } else {
+    console.error('[LocalStream] failed to start local stream', data);
     alert('Failed to start server stream: ' + (data.error || JSON.stringify(data)));
   }
 }
 
 async function stopServerStream(cameraId) {
+  console.log('[LocalStream] stopping local RTMP stream', { cameraId });
   await fetch('/api/stream/stop', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ cameraId })
   });
   delete serverActive[cameraId];
+  console.log('[LocalStream] local stream stopped');
   renderServerCameras();
 }
 
@@ -652,22 +725,34 @@ function showRTMPModal(cameraId) {
   const stream = serverActive[cameraId];
   if (!stream) return;
 
+  const host = serverConfig.host || '127.0.0.1';
+  const viewerUrl = `http://${host}:${serverConfig.port || 8080}/watch/${cameraId}`;
+  const rtmpUrl = stream.rtmp || `rtmp://${host}:${serverConfig.rtmpPort || 1935}/${cameraId}`;
+  const hlsUrl = `http://${host}:${serverConfig.hlsPort || 8888}/${cameraId}/index.m3u8`;
+
   const modal = document.createElement('div');
   modal.className = 'fixed inset-0 bg-black/90 flex items-center justify-center z-[100] p-6';
   modal.innerHTML = `
     <div class="bg-zinc-900 border border-zinc-700 rounded-3xl max-w-lg w-full p-8">
-      <div class="font-semibold text-xl mb-1">RTMP Stream Active</div>
+      <div class="font-semibold text-xl mb-1">Live Stream</div>
       <div class="text-sm text-zinc-400 mb-6">${stream.cameraId}</div>
 
-      <div class="text-xs text-zinc-400 mb-1.5">RTMP URL (use in VLC, OBS, GameChanger, etc.)</div>
+      <div class="text-xs text-zinc-400 mb-1.5">Viewer URL (open in any browser — scan this QR from your phone to watch the live video)</div>
       <div onclick="navigator.clipboard.writeText(this.innerText)" 
-           class="font-mono text-sm bg-black p-4 rounded-2xl text-emerald-400 cursor-pointer break-all mb-6 select-all">
-        ${stream.rtmp}
+           class="font-mono text-sm bg-black p-4 rounded-2xl text-emerald-400 cursor-pointer break-all mb-4 select-all">
+        ${viewerUrl}
       </div>
 
-      <div class="text-xs text-zinc-400 mb-2">QR Code</div>
-      <img src="/api/qr?text=${encodeURIComponent(stream.rtmp)}" 
-           class="bg-white p-3 rounded-2xl w-[200px] h-[200px] mb-6" alt="QR Code for ${stream.rtmp}">
+      <div class="text-xs text-zinc-400 mb-2">QR Code (scan on phone)</div>
+      <img src="/api/qr?text=${encodeURIComponent(viewerUrl)}" 
+           class="bg-white p-3 rounded-2xl w-[200px] h-[200px] mb-6" alt="QR Code for live viewer">
+
+      <div class="text-xs text-zinc-500 mb-1.5">Direct HLS (for players): ${hlsUrl}</div>
+      <div class="text-xs text-zinc-500 mb-1.5">Advanced: RTMP URL (for VLC/OBS)</div>
+      <div onclick="navigator.clipboard.writeText(this.innerText)" 
+           class="font-mono text-xs bg-black p-2 rounded-2xl text-zinc-400 cursor-pointer break-all mb-6 select-all">
+        ${rtmpUrl}
+      </div>
 
       <button onclick="this.closest('.fixed').remove()" 
               class="w-full py-3 rounded-2xl bg-white text-black font-semibold">Close</button>
@@ -680,23 +765,35 @@ function showRTMPModalByPath(path) {
   const info = (activeCleanStreams || []).find(s => s.path === path);
   if (!info) return alert('Active stream info not found for ' + path);
 
-  const rtmpUrl = `rtmp://127.0.0.1:1935/${path}`;
+  // Use the server-reported address (from /api/config) so the QR works when scanned from a phone on the LAN.
+  const host = serverConfig.host || '127.0.0.1';
+  const viewerUrl = `http://${host}:${serverConfig.port || 8080}/watch/${path}`;
+  const rtmpUrl = `rtmp://${host}:${serverConfig.rtmpPort || 1935}/${path}`;
+  const hlsUrl = `http://${host}:${serverConfig.hlsPort || 8888}/${path}/index.m3u8`;
+
   const modal = document.createElement('div');
   modal.className = 'fixed inset-0 bg-black/90 flex items-center justify-center z-[100] p-6';
   modal.innerHTML = `
     <div class="bg-zinc-900 border border-zinc-700 rounded-3xl max-w-lg w-full p-8">
-      <div class="font-semibold text-xl mb-1">RTMP Stream Active</div>
+      <div class="font-semibold text-xl mb-1">Live Stream</div>
       <div class="text-sm text-zinc-400 mb-6">${info.name || info.rawId} (${path})</div>
 
-      <div class="text-xs text-zinc-400 mb-1.5">RTMP URL (use in VLC, OBS, or GameChanger)</div>
+      <div class="text-xs text-zinc-400 mb-1.5">Viewer URL (open in any browser — scan this QR from your phone to watch the live video with HLS playback)</div>
       <div onclick="navigator.clipboard.writeText(this.innerText)" 
-           class="font-mono text-sm bg-black p-4 rounded-2xl text-emerald-400 cursor-pointer break-all mb-6 select-all">
-        ${rtmpUrl}
+           class="font-mono text-sm bg-black p-4 rounded-2xl text-emerald-400 cursor-pointer break-all mb-4 select-all">
+        ${viewerUrl}
       </div>
 
-      <div class="text-xs text-zinc-400 mb-2">QR Code</div>
-      <img src="/api/qr?text=${encodeURIComponent(rtmpUrl)}" 
-           class="bg-white p-3 rounded-2xl w-[200px] h-[200px] mb-6" alt="QR Code">
+      <div class="text-xs text-zinc-400 mb-2">QR Code (scan on phone)</div>
+      <img src="/api/qr?text=${encodeURIComponent(viewerUrl)}" 
+           class="bg-white p-3 rounded-2xl w-[200px] h-[200px] mb-6" alt="QR Code for live viewer">
+
+      <div class="text-xs text-zinc-500 mb-1.5">Direct HLS (for players): ${hlsUrl}</div>
+      <div class="text-xs text-zinc-500 mb-1.5">Advanced: RTMP URL (for VLC/OBS)</div>
+      <div onclick="navigator.clipboard.writeText(this.innerText)" 
+           class="font-mono text-xs bg-black p-2 rounded-2xl text-zinc-400 cursor-pointer break-all mb-6 select-all">
+        ${rtmpUrl}
+      </div>
 
       <button onclick="this.closest('.fixed').remove()" 
               class="w-full py-3 rounded-2xl bg-white text-black font-semibold">Close</button>
@@ -833,6 +930,8 @@ async function updateGameChangerStatus() {
     const res = await fetch('/api/gamechanger/status');
     const data = await res.json();
 
+    console.log('[GameChanger] status poll result', data);
+
     if (data.active) {
       statusEl.textContent = `Active → ${data.camera || 'unknown camera'}`;
       statusEl.className = 'text-sm text-emerald-400 ml-2';
@@ -841,6 +940,7 @@ async function updateGameChangerStatus() {
       statusEl.className = 'text-sm text-zinc-400 ml-2';
     }
   } catch (e) {
+    console.error('[GameChanger] status poll error', e);
     statusEl.textContent = 'Error checking status';
   }
 }
@@ -859,8 +959,10 @@ setTimeout(() => {
 }, 1000);
 
 // Boot
-refreshServerCameras();
-updateGameChangerStatus();
+loadServerConfig().finally(() => {
+  refreshServerCameras();
+  updateGameChangerStatus();
+});
 
 // Connect to realtime SSE for global/device status + live streaming stats.
 // After this the UI will receive push updates on every start/stop/GC change/stats tick.

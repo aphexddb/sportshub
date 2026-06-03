@@ -1,9 +1,11 @@
 package main
 
 import (
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -17,6 +19,9 @@ import (
 	"sportshub2/pkg/media"
 	"sportshub2/pkg/sources"
 )
+
+//go:embed static/hls.min.js
+var hlsJS []byte
 
 // Simple in-memory state for the Windows spike
 type Camera struct {
@@ -49,6 +54,8 @@ var (
 	// last used GC config per clean path, for easy restart
 	gcLastConfigs = make(map[string]GCConfig)
 )
+
+var publicHost string // non-loopback IP for phone/LAN access (used for viewer URLs and QR codes)
 
 type GCConfig struct {
 	FullURL string `json:"fullUrl,omitempty"`
@@ -138,8 +145,10 @@ func setLocalDemand(rawID string, on bool) {
 	d.local = on
 	if on && !was {
 		ensureCapture(rawID)
+		log.Printf("[state] local demand ON for %s", rawID)
 	} else if !on && was {
 		cleanupCapture(rawID)
+		log.Printf("[state] local demand OFF for %s", rawID)
 	}
 	broadcastStatus()
 }
@@ -150,8 +159,10 @@ func setGCDemand(rawID string, on bool) {
 	d.gc = on
 	if on && !was {
 		ensureCapture(rawID)
+		log.Printf("[state] GC demand ON for %s", rawID)
 	} else if !on && was {
 		cleanupCapture(rawID)
+		log.Printf("[state] GC demand OFF for %s", rawID)
 	}
 	broadcastStatus()
 }
@@ -233,6 +244,132 @@ func saveGCLastConfigs() {
 	path := filepath.Join(dir, "gc_lasts.json")
 	b, _ := json.MarshalIndent(gcLastConfigs, "", "  ")
 	_ = os.WriteFile(path, b, 0644)
+}
+
+// initPublicHost tries to find a usable LAN IP so phones on the same network
+// can scan QR codes and reach the video viewer page.
+func initPublicHost() {
+	publicHost = "127.0.0.1"
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || (iface.Flags&net.FlagLoopback) != 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if ip == nil || ip.IsLoopback() {
+				continue
+			}
+			if ip4 := ip.To4(); ip4 != nil {
+				publicHost = ip4.String()
+				return // first suitable IPv4 is good enough for LAN use
+			}
+		}
+	}
+}
+
+type ServerConfig struct {
+	Host     string `json:"host"`
+	Port     int    `json:"port"`
+	RTMPPort int    `json:"rtmpPort"`
+	HLSPort  int    `json:"hlsPort"`
+}
+
+func configHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(ServerConfig{
+		Host:     publicHost,
+		Port:     8080,
+		RTMPPort: 1935,
+		HLSPort:  8888,
+	})
+}
+
+func watchHandler(w http.ResponseWriter, r *http.Request) {
+	// Expect /watch/cam0
+	trimmed := strings.TrimPrefix(r.URL.Path, "/watch/")
+	parts := strings.Split(trimmed, "/")
+	streamPath := ""
+	if len(parts) > 0 {
+		streamPath = parts[0]
+	}
+	if streamPath == "" {
+		http.NotFound(w, r)
+		return
+	}
+
+	hlsURL := fmt.Sprintf("http://%s:8888/%s/index.m3u8", publicHost, streamPath)
+	rtmpURL := fmt.Sprintf("rtmp://%s:1935/%s", publicHost, streamPath)
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+
+	page := fmt.Sprintf(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sportshub • %s</title>
+  <style>
+    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background:#0a0a0a; color:#eee; margin:0; padding:16px; display:flex; flex-direction:column; align-items:center; }
+    h1 { font-size:1.1rem; margin:0 0 12px; }
+    video { width:100%%; max-width:960px; background:#000; border-radius:12px; box-shadow:0 10px 30px rgba(0,0,0,0.6); }
+    .meta { margin-top:12px; font-size:0.75rem; color:#666; word-break:break-all; text-align:center; }
+    .btn { margin-top:12px; padding:10px 18px; background:#222; color:#ddd; border:1px solid #333; border-radius:8px; cursor:pointer; }
+    .btn:hover { background:#333; }
+  </style>
+</head>
+<body>
+  <h1>Live • %s</h1>
+  <video id="video" autoplay controls playsinline></video>
+  <div class="meta">HLS stream: %s<br>RTMP (for OBS/VLC): %s</div>
+  <button class="btn" onclick="const v=document.getElementById('video'); if(v.requestFullscreen) v.requestFullscreen(); else if(v.webkitRequestFullscreen) v.webkitRequestFullscreen();">Fullscreen</button>
+
+  <script src="/static/hls.min.js"></script>
+  <script>
+    // Full HLS playback support using embedded hls.js for broad browser compatibility
+    // (including non-Safari browsers on LAN without internet). Falls back to native HLS.
+    const video = document.getElementById('video');
+    const src = '%s';
+    if (typeof Hls !== 'undefined' && Hls.isSupported()) {
+      const hls = new Hls({ enableWorker: true, lowLatencyMode: true, backBufferLength: 30 });
+      hls.loadSource(src);
+      hls.attachMedia(video);
+      hls.on(Hls.Events.MANIFEST_PARSED, function() {
+        video.play().catch(function(){});
+      });
+      hls.on(Hls.Events.ERROR, function(event, data) {
+        if (data.fatal) {
+          console.error('HLS fatal error, falling back to native', data);
+          video.src = src;
+        }
+      });
+    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      video.src = src;
+      video.addEventListener('loadedmetadata', function() {
+        video.play().catch(function(){});
+      });
+    } else {
+      video.src = src;
+    }
+  </script>
+</body>
+</html>`, streamPath, streamPath, hlsURL, rtmpURL, hlsURL)
+
+	fmt.Fprint(w, page)
 }
 
 // ---------------- SSE realtime status hub ----------------
@@ -446,9 +583,21 @@ func main() {
 	// SSE realtime status (global + per device + live stats). UI connects once and stays fresh.
 	http.HandleFunc("/api/events", eventsHandler)
 
+	// Public config + viewer page so phones can scan QR codes and watch the live video
+	// instead of trying to open raw RTMP URLs.
+	http.HandleFunc("/api/config", configHandler)
+	http.HandleFunc("/watch/", watchHandler)
+	http.HandleFunc("/static/hls.min.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		w.Write(hlsJS)
+	})
+
+	initPublicHost()
+
 	port := ":8080"
 	log.Printf("=== SportsHub Windows Spike ===")
-	log.Printf("Open http://localhost%s", port)
+	log.Printf("Open http://%s%s (use this address from phones on the same LAN) or http://localhost%s", publicHost, port, port)
 	log.Printf("Browser Live Preview (top section) = browser getUserMedia")
 	log.Printf("Server RTMP list (bottom) = what our ffmpeg can see for real RTMP streaming")
 
@@ -507,7 +656,7 @@ func startStreamHandler(w http.ResponseWriter, r *http.Request) {
 	streamPath := fmt.Sprintf("cam%d", nextCamIndex)
 	nextCamIndex++
 
-	rtmpURL := fmt.Sprintf("rtmp://127.0.0.1:1935/%s", streamPath)
+	rtmpURL := fmt.Sprintf("rtmp://%s:1935/%s", publicHost, streamPath)
 
 	streams[req.CameraID] = &Stream{
 		CameraID:  req.CameraID,
@@ -677,14 +826,6 @@ func gameChangerStartHandler(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(500 * time.Millisecond)
 	}
 
-	gcMu.Lock()
-	defer gcMu.Unlock()
-
-	if gcActive {
-		http.Error(w, "GameChanger stream already active", http.StatusConflict)
-		return
-	}
-
 	// Construct destination.
 	// Full URL takes precedence (GameChanger often gives you one complete URL).
 	var dest string
@@ -751,6 +892,51 @@ func gameChangerStartHandler(w http.ResponseWriter, r *http.Request) {
 				if n > 0 {
 					s := string(buf[:n])
 					log.Printf("[gamechanger ffmpeg stderr] %s", s)
+
+					// Detect when GameChanger app closes the stream (RTMP push side fails)
+					// This lets us immediately clear GC state even if the process exit monitor is slow.
+					lowerS := strings.ToLower(s)
+					if (strings.Contains(lowerS, "connection to") && strings.Contains(lowerS, "failed")) ||
+						strings.Contains(lowerS, "error writing") ||
+						strings.Contains(lowerS, "immediate exit requested") ||
+						(strings.Contains(lowerS, "av_interleaved_write_frame") && strings.Contains(lowerS, "end of file")) {
+						log.Printf("[gamechanger] detected remote close/error from GameChanger side in restream stderr, forcing state cleanup")
+						go func() {
+							gcMu.Lock()
+							if gcActive {
+								c := gcCmd
+								gcCmd = nil
+								gcActive = false
+								p := gcActivePath
+								gcActivePath = ""
+								gcCamera = ""
+								gcEgress = media.StreamStats{}
+								gcMu.Unlock()
+
+								if c != nil && c.Process != nil {
+									_ = c.Process.Kill()
+								}
+
+								raw := ""
+								mu.Lock()
+								for pp, info := range serverStreams {
+									if pp == p {
+										raw = info.RawID
+										break
+									}
+								}
+								mu.Unlock()
+
+								if raw != "" {
+									setGCDemand(raw, false)
+								}
+								broadcastStatus()
+							} else {
+								gcMu.Unlock()
+							}
+						}()
+					}
+
 					fps, br, spd, fr := media.ParseFFmpegProgressLine(s)
 					if fps != 0 || br != "" || fr != 0 {
 						gcMu.Lock()
@@ -783,12 +969,46 @@ func gameChangerStartHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Claim the GC slot under lock, but hold the lock only briefly.
+	// Do heavy work (monitor goroutine, lastconfig save, broadcast) after releasing the lock
+	// to avoid blocking other gcMu users (status, stop, ticker, stderr stats updater, etc.)
+	// and to ensure the HTTP response is sent promptly so the client UI can update from "Starting...".
+	gcMu.Lock()
+	if gcActive {
+		gcMu.Unlock()
+		_ = cmd.Process.Kill()
+		http.Error(w, "GameChanger stream already active", http.StatusConflict)
+		return
+	}
 	gcCmd = cmd
 	gcActive = true
-	// Always store the *clean* path we are actually publishing under (assigned by ensureCapture).
-	// This keeps comparisons in stop handlers and activeStreams consistent.
 	gcActivePath = path
 	gcCamera = req.CameraPath
+	gcMu.Unlock()
+
+	// Monitor the restream process so we detect when GameChanger app (or remote)
+	// closes the connection. When that happens we must clear gc state, drop demand
+	// (so capture can stop if nothing else needs it), and push SSE update to UI.
+	go func(c *exec.Cmd, cleanPath, rID string) {
+		waitErr := c.Wait()
+		gcMu.Lock()
+		if gcCmd == c {
+			log.Printf("[gamechanger] restream process exited (GameChanger app stopped the stream or connection closed): %v", waitErr)
+			gcCmd = nil
+			gcActive = false
+			gcActivePath = ""
+			gcCamera = ""
+			gcEgress = media.StreamStats{}
+			gcMu.Unlock()
+
+			if rID != "" {
+				setGCDemand(rID, false)
+			}
+			broadcastStatus()
+		} else {
+			gcMu.Unlock()
+		}
+	}(cmd, path, rawID)
 
 	// store last config *by the stable raw device ID* so restart works across sportshub restarts
 	// and we can show "Restart GC (last)" for a device even if it has no current local stream.
@@ -802,7 +1022,7 @@ func gameChangerStartHandler(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[gamechanger] Started push for %s (clean=%s) → %s (fullUrl=%v)", req.CameraPath, path, dest, req.GcFullUrl != "")
 
-	// zero previous egress stats for the new push
+	// zero previous egress stats for the new push (brief lock)
 	gcMu.Lock()
 	gcEgress = media.StreamStats{}
 	gcMu.Unlock()
@@ -819,19 +1039,30 @@ func gameChangerStartHandler(w http.ResponseWriter, r *http.Request) {
 
 func gameChangerStopHandler(w http.ResponseWriter, r *http.Request) {
 	gcMu.Lock()
-	defer gcMu.Unlock()
 
 	if !gcActive || gcCmd == nil {
+		gcMu.Unlock()
 		http.Error(w, "no active GameChanger stream", http.StatusConflict)
 		return
 	}
 
 	log.Printf("[gamechanger] Stopping stream for %s", gcCamera)
 
+	c := gcCmd
+	activePath := gcActivePath
+	gcCmd = nil
+	gcActive = false
+	gcActivePath = ""
+	gcCamera = ""
+	gcEgress = media.StreamStats{}
+	gcMu.Unlock()
+
+	// Do demand cleanup and broadcast outside the lock to avoid deadlock
+	// (setGCDemand and broadcastStatus take other locks including gcMu).
 	raw := ""
 	mu.Lock()
 	for p, info := range serverStreams {
-		if p == gcActivePath {
+		if p == activePath {
 			raw = info.RawID
 			break
 		}
@@ -841,15 +1072,9 @@ func gameChangerStopHandler(w http.ResponseWriter, r *http.Request) {
 		setGCDemand(raw, false)
 	}
 
-	_ = gcCmd.Process.Kill()
-	gcCmd = nil
-	gcActive = false
-	gcActivePath = ""
-	gcCamera = ""
-
-	gcMu.Lock()
-	gcEgress = media.StreamStats{}
-	gcMu.Unlock()
+	if c != nil && c.Process != nil {
+		_ = c.Process.Kill()
+	}
 
 	broadcastStatus()
 
