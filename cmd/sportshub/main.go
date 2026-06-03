@@ -334,7 +334,7 @@ func watchHandler(w http.ResponseWriter, r *http.Request) {
 </head>
 <body>
   <h1>Live • %s</h1>
-  <video id="video" autoplay controls playsinline></video>
+  <video id="video" autoplay controls playsinline muted></video>
   <div class="meta">HLS stream: %s<br>RTMP (for OBS/VLC): %s</div>
   <button class="btn" onclick="const v=document.getElementById('video'); if(v.requestFullscreen) v.requestFullscreen(); else if(v.webkitRequestFullscreen) v.webkitRequestFullscreen();">Fullscreen</button>
 

@@ -74,7 +74,10 @@ api: no
 metrics: no
 webrtc: no
 rtsp: no
-hls: no
+
+hls: yes
+hlsAddress: :8888
+hlsAllowOrigin: '*'
 
 paths:
   all:
@@ -125,7 +128,14 @@ paths:
 		log.Printf("[mediamtx] SRT UDP port 8890 appears bound")
 	}
 
-	log.Printf("[mediamtx] MediaMTX is ready (RTMP + SRT)")
+	// Wait for HLS (now enabled for local viewer / QR code streaming)
+	if err := waitForPort("tcp", "127.0.0.1:8888", 10*time.Second); err != nil {
+		log.Printf("[mediamtx] WARNING: HLS port 8888 not ready after start: %v", err)
+	} else {
+		log.Printf("[mediamtx] HLS port 8888 is ready")
+	}
+
+	log.Printf("[mediamtx] MediaMTX is ready (RTMP + SRT + HLS)")
 
 	mtxReadyMu.Lock()
 	mtxReady = true
