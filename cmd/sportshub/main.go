@@ -237,48 +237,6 @@ func killOldProcesses() {
 	log.Printf("[startup] Port/process cleanup complete (our pid=%d). 1935/8890 should be free for MediaMTX.", ourPID)
 }
 
-// getStateDir returns the same bin dir used for mediamtx/ffmpeg so we can store small state (last GC configs).
-func getStateDir() (string, error) {
-	appData, err := os.UserCacheDir()
-	if err != nil {
-		appData = os.TempDir()
-	}
-	dir := filepath.Join(appData, "sportshub", "bin")
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return "", err
-	}
-	return dir, nil
-}
-
-func loadGCLastConfigs() {
-	dir, err := getStateDir()
-	if err != nil {
-		return
-	}
-	path := filepath.Join(dir, "gc_lasts.json")
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return
-	}
-	var m map[string]GCConfig
-	if json.Unmarshal(b, &m) == nil {
-		for k, v := range m {
-			gcLastConfigs[k] = v
-		}
-		log.Printf("[gamechanger] loaded %d last GC config(s) from disk", len(m))
-	}
-}
-
-func saveGCLastConfigs() {
-	dir, err := getStateDir()
-	if err != nil {
-		return
-	}
-	path := filepath.Join(dir, "gc_lasts.json")
-	b, _ := json.MarshalIndent(gcLastConfigs, "", "  ")
-	_ = os.WriteFile(path, b, 0644)
-}
-
 // initPublicHost tries to find a usable LAN IP so phones on the same network
 // can scan QR codes and reach the video viewer page.
 func initPublicHost() {
@@ -628,7 +586,6 @@ func eventsHandler(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	killOldProcesses()
-	loadGCLastConfigs()
 
 	// Wire notifier from media layer (ingest start/stop + live fps/bitrate stats) into our SSE broadcaster.
 	media.SetNotifier(func(event string, payload any) {
@@ -1100,15 +1057,14 @@ func gameChangerStartHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}(cmd, path, rawID)
 
-	// store last config *by the stable raw device ID* so restart works across sportshub restarts
-	// and we can show "Restart GC (last)" for a device even if it has no current local stream.
+	// Remember the last config in memory (by the stable raw device ID) so "Restart GC (last)"
+	// works for the rest of this session. Not persisted to disk — it resets on restart.
 	gcLastConfigs[rawID] = GCConfig{
 		FullURL: req.GcFullUrl,
 		Server:  req.GcServer,
 		Key:     req.GcKey,
 		RawID:   rawID,
 	}
-	saveGCLastConfigs()
 
 	log.Printf("[gamechanger] Started push for %s (clean=%s) → %s (fullUrl=%v)", req.CameraPath, path, dest, req.GcFullUrl != "")
 
