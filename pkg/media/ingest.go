@@ -29,6 +29,30 @@ var (
 	notifier    func(event string, payload any)
 )
 
+var (
+	initProgressMu sync.RWMutex
+	initProgress   func(stage, msg string)
+)
+
+// SetInitProgress registers a callback the media layer uses to report fine-grained
+// boot progress (e.g. "downloading MediaMTX" vs "already present"). The app wires this
+// into the InitManager so the spinner message reflects long download steps live.
+func SetInitProgress(fn func(stage, msg string)) {
+	initProgressMu.Lock()
+	initProgress = fn
+	initProgressMu.Unlock()
+}
+
+// reportInitProgress invokes the registered init-progress callback if any.
+func reportInitProgress(stage, msg string) {
+	initProgressMu.RLock()
+	fn := initProgress
+	initProgressMu.RUnlock()
+	if fn != nil {
+		fn(stage, msg)
+	}
+}
+
 // SetNotifier lets the HTTP server register a callback so that ingest lifecycle
 // and live stats can drive SSE broadcasts.
 func SetNotifier(n func(string, any)) { notifier = n }
@@ -125,6 +149,37 @@ func InitMedia() error {
 	return initErr
 }
 
+// ensureSupervisor lazily creates the process-wide supervisor so the caller-driven
+// boot steps (EnsureBinaries / StartMediaMTX below) and InitMedia share one instance.
+func ensureSupervisor() *Supervisor {
+	ingestMu.Lock()
+	defer ingestMu.Unlock()
+	if globalSupervisor == nil {
+		globalSupervisor = NewSupervisor()
+	}
+	return globalSupervisor
+}
+
+// EnsureBinaries downloads/locates MediaMTX + ffmpeg. Package-level entry point so the
+// app can drive boot steps one at a time and report progress between them. Safe to call
+// before StartMediaMTX. Idempotent.
+func EnsureBinaries() error {
+	return ensureSupervisor().EnsureBinaries()
+}
+
+// StartMediaMTX writes the config, starts the MediaMTX process and waits for its
+// streaming ports. Package-level entry point paired with EnsureBinaries above so the
+// app can report progress between binary checks and server startup. Idempotent.
+func StartMediaMTX() error {
+	if err := ensureSupervisor().StartMediaMTX(); err != nil {
+		return fmt.Errorf("MediaMTX failed to start: %w", err)
+	}
+	// Mark InitMedia as already done so a later StartIngestForCamera (which calls
+	// InitMedia via initOnce) doesn't redundantly re-run the boot steps.
+	initOnce.Do(func() {})
+	return nil
+}
+
 // StartIngestForCamera starts ffmpeg capturing from a dshow device and pushing into MediaMTX.
 // cameraID is the raw dshow name (e.g. "Mevo-2GB5D (046d:d119)").
 func StartIngestForCamera(cameraID, streamPath string) error {
@@ -174,7 +229,7 @@ func StartIngestForCamera(cameraID, streamPath string) error {
 		"-b:v", "5000k",
 		"-maxrate", "6000k",
 		"-bufsize", "8000k",
-		"-g", "15",  // lower GOP for reduced latency
+		"-g", "15", // lower GOP for reduced latency
 		"-keyint_min", "15",
 		"-pix_fmt", "yuv420p",
 		"-fflags", "+genpts",

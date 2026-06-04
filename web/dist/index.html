@@ -12,6 +12,17 @@
   </style>
 </head>
 <body class="bg-zinc-950 text-white">
+  <!-- Full-screen boot overlay. Visible by default (before SSE connects) so there is never
+       a flash of the un-booted app. Hidden once the server reports initReady=true. If the
+       server reports an init error, the message is shown in red and the overlay stays up. -->
+  <div id="boot-overlay"
+       class="fixed inset-0 z-50 flex flex-col items-center justify-center bg-zinc-950 text-center px-6">
+    <div id="boot-spinner"
+         class="w-12 h-12 rounded-full border-4 border-zinc-700 border-t-emerald-400 animate-spin"></div>
+    <div id="boot-title" class="mt-6 text-lg font-semibold tracking-tight">Starting sportshub…</div>
+    <div id="boot-message" class="mt-2 text-sm text-zinc-400 font-mono max-w-md">Starting up…</div>
+  </div>
+
   <div class="max-w-6xl mx-auto p-4 sm:p-8">
     <!-- Header -->
     <div class="flex items-center justify-between mb-10">
@@ -371,6 +382,7 @@ function applyServerStatus(update) {
       gcLast: d.gcLast || null
     }));
 
+  updateBootOverlay(update);
   renderServerCameras();
   updateGlobalStatusBar(update);
 
@@ -380,6 +392,47 @@ function applyServerStatus(update) {
   if (gcStopBtn && update.global) {
     gcStopBtn.classList.toggle('hidden', !update.global.gcActive);
   }
+}
+
+// updateBootOverlay drives the full-screen boot spinner from the server's init state.
+// While initReady is false the overlay stays up with the latest initMessage; once
+// initReady is true it is hidden, revealing the app. An init error keeps the overlay
+// up and shows the message in red.
+function updateBootOverlay(update) {
+  const overlay = document.getElementById('boot-overlay');
+  if (!overlay) return;
+  const g = (update && update.global) || {};
+
+  if (g.initError) {
+    const titleEl = document.getElementById('boot-title');
+    const msgEl = document.getElementById('boot-message');
+    const spinner = document.getElementById('boot-spinner');
+    if (titleEl) {
+      titleEl.textContent = 'Startup failed';
+      titleEl.classList.add('text-red-500');
+    }
+    if (msgEl) {
+      msgEl.textContent = g.initError;
+      msgEl.classList.remove('text-zinc-400');
+      msgEl.classList.add('text-red-500');
+    }
+    // Stop spinning to signal it's stuck (not just slow).
+    if (spinner) spinner.classList.remove('animate-spin');
+    overlay.classList.remove('hidden');
+    return;
+  }
+
+  if (g.initReady) {
+    overlay.classList.add('hidden');
+    return;
+  }
+
+  // Still booting: update the message and keep the overlay visible.
+  const msgEl = document.getElementById('boot-message');
+  if (msgEl && g.initMessage) {
+    msgEl.textContent = g.initMessage;
+  }
+  overlay.classList.remove('hidden');
 }
 
 function updateGlobalStatusBar(update) {

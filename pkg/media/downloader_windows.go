@@ -41,12 +41,14 @@ func EnsureMediaMTX() (string, error) {
 
 	path := filepath.Join(binDir, "mediamtx.exe")
 	if _, err := os.Stat(path); err == nil {
+		reportInitProgress("binaries", "MediaMTX already present")
 		return path, nil // already have it
 	}
 
 	// Use a recent stable release (update this URL when new versions come out)
 	url := "https://github.com/bluenviron/mediamtx/releases/download/v1.11.3/mediamtx_v1.11.3_windows_amd64.zip"
 
+	reportInitProgress("binaries", "Downloading MediaMTX (~25MB, first run only)…")
 	fmt.Println("Downloading MediaMTX (one-time, ~25MB)...")
 	zipPath := filepath.Join(binDir, "mediamtx.zip")
 	if err := downloadFile(url, zipPath); err != nil {
@@ -77,6 +79,7 @@ func EnsureFFmpeg() (string, error) {
 
 	path := filepath.Join(binDir, "ffmpeg.exe")
 	if _, err := os.Stat(path); err == nil {
+		reportInitProgress("binaries", "ffmpeg already present")
 		return path, nil
 	}
 
@@ -87,6 +90,7 @@ func EnsureFFmpeg() (string, error) {
 	// If you want the absolute latest, we can switch.
 	url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
 
+	reportInitProgress("binaries", "Downloading ffmpeg (~100MB, first run only)…")
 	fmt.Println("Downloading ffmpeg (one-time, ~100MB+ — this will take a minute)...")
 	zipPath := filepath.Join(binDir, "ffmpeg.zip")
 	if err := downloadFile(url, zipPath); err != nil {

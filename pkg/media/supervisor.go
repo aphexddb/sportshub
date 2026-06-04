@@ -184,4 +184,3 @@ func waitForPort(network, addr string, timeout time.Duration) error {
 func osWriteFile(name string, data []byte, perm os.FileMode) error {
 	return os.WriteFile(name, data, perm)
 }
-

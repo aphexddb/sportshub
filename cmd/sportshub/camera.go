@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
@@ -575,9 +576,15 @@ func currentQuality() string {
 }
 
 // buildGCArgs builds the GameChanger restream ffmpeg command (SRT pull → re-encode → FLV/RTMP).
+//
+// dest is passed through verbatim from the GameChanger start request and may be either a
+// plain "rtmp://..." or a secure "rtmps://host:443/app/key" URL. The bundled ffmpeg is built
+// with --enable-schannel, so its native rtmp implementation negotiates TLS for rtmps:// over
+// Windows' system trust store. ffmpeg parses the rtmps URL itself; we pass it through
+// unmodified so the host:port/app/key (and any ?gc_ext=true query) reach the muxer intact.
 func buildGCArgs(path, dest string, enc gcEncodeParams) []string {
 	source := fmt.Sprintf("srt://127.0.0.1:8890?streamid=read:%s&latency=30000&mode=caller", path)
-	return []string{
+	args := []string{
 		"-fflags", "nobuffer",
 		"-flags", "low_delay",
 		// NOTE: never "-avioflags direct" on SRT input — it forces tiny unbuffered reads that
@@ -605,6 +612,27 @@ func buildGCArgs(path, dest string, enc gcEncodeParams) []string {
 		"-ar", "48000",
 		"-ac", "2",
 		"-f", "flv",
-		dest,
 	}
+
+	// For secure rtmps destinations, add a read/write timeout so a half-open TLS handshake
+	// (e.g. a dropped connection mid-negotiation) fails fast instead of hanging the push
+	// goroutine indefinitely. This is a per-stream option and must precede the output URL.
+	//
+	// We intentionally do NOT pass "-tls_verify 0": a dry push to the real AWS IVS /
+	// live-video.net contribute endpoint completed the TLS handshake and the full RTMP
+	// connect/publish exchange under schannel with certificate verification left at its
+	// secure default, so relaxing verification is unnecessary and would weaken the push.
+	if isRTMPS(dest) {
+		// 15s in microseconds. Applies to the output socket, covering the TLS+RTMP handshake.
+		args = append(args, "-rw_timeout", "15000000")
+	}
+
+	args = append(args, dest)
+	return args
+}
+
+// isRTMPS reports whether dest is a secure RTMP-over-TLS URL (rtmps://...). The scheme check
+// is case-insensitive and tolerant of leading whitespace in the operator-supplied value.
+func isRTMPS(dest string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(dest)), "rtmps://")
 }

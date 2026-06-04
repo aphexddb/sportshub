@@ -338,6 +338,13 @@ type GlobalStatus struct {
 	GCPath        string `json:"gcPath,omitempty"`
 	GCActiveRaw   string `json:"gcActiveRaw,omitempty"`
 	GCQuality     string `json:"gcQuality"` // global broadcast quality: "1080p" or "720p"
+
+	// Boot lifecycle, surfaced to the frontend full-screen spinner. While InitReady is
+	// false the UI shows the spinner with InitMessage; InitError (if set) is shown in red.
+	InitReady   bool   `json:"initReady"`
+	InitPhase   string `json:"initPhase"`
+	InitMessage string `json:"initMessage"`
+	InitError   string `json:"initError,omitempty"`
 }
 
 type DeviceStatus struct {
@@ -371,6 +378,13 @@ func buildStatusSnapshot() StatusSnapshot {
 	gcQualityMu.Lock()
 	snap.Global.GCQuality = gcQuality
 	gcQualityMu.Unlock()
+
+	// Boot lifecycle (source of truth for the frontend spinner).
+	st := initMgr.State()
+	snap.Global.InitReady = st.Ready
+	snap.Global.InitPhase = st.Phase
+	snap.Global.InitMessage = st.Message
+	snap.Global.InitError = st.Error
 
 	if camMgr != nil {
 		devs, g := camMgr.Snapshot()
@@ -424,8 +438,6 @@ func eventsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	killOldProcesses()
-
 	// Per-camera state machines; broadcast SSE on any transition.
 	camMgr = NewCameraManager(func() { go broadcastStatus() })
 
@@ -491,16 +503,23 @@ func main() {
 	log.Printf("Browser Live Preview (top section) = browser getUserMedia")
 	log.Printf("Server RTMP list (bottom) = what our ffmpeg can see for real RTMP streaming")
 
-	// Pre-start MediaMTX early so it's ready when first ingest or GC is requested.
-	// This avoids long waits/timeouts on first use.
-	go func() {
-		if err := media.InitMedia(); err != nil {
-			log.Printf("[media] pre-init MediaMTX warning: %v", err)
-		} else {
-			// Push an initial status snapshot once MTX is up.
-			go broadcastStatus()
-		}
-	}()
+	// Let the media layer report fine-grained download/startup progress into the boot
+	// state so the spinner message updates live (e.g. "Downloading ffmpeg…"). We keep
+	// the phase at "binaries" during EnsureBinaries; runBoot owns the higher-level phases.
+	media.SetInitProgress(func(stage, msg string) {
+		initMgr.SetPhase(stage, msg)
+	})
+
+	// Start broadcasting the boot status to the spinner every 500ms until ready. This
+	// runs before the boot goroutine so the very first snapshots already reflect progress.
+	startInitBroadcaster(broadcastStatus)
+
+	// Run the slow boot sequence (port cleanup, binary download, MediaMTX startup) on a
+	// background goroutine so the HTTP server below can start serving the page immediately.
+	go runBoot(func() {
+		// Push a final snapshot once MediaMTX is up so the UI reveals the app promptly.
+		go broadcastStatus()
+	})
 
 	// Light ticker so live stats (fps/bitrate) keep flowing to UI even during quiet periods of ffmpeg output,
 	// and global view stays fresh while anything is streaming.
@@ -514,6 +533,8 @@ func main() {
 		}
 	}()
 
+	// HTTP first: this blocks, but all the slow boot work is already running in the
+	// background, so the page is serveable within tens of ms of process start.
 	if err := http.ListenAndServe(port, nil); err != nil {
 		log.Fatal(err)
 	}
