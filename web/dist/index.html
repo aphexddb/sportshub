@@ -12,7 +12,7 @@
   </style>
 </head>
 <body class="bg-zinc-950 text-white">
-  <div class="max-w-6xl mx-auto p-8">
+  <div class="max-w-6xl mx-auto p-4 sm:p-8">
     <!-- Header -->
     <div class="flex items-center justify-between mb-10">
       <div>
@@ -20,76 +20,44 @@
         <p class="text-zinc-400 mt-1">making sports video easy</p>
       </div>
       <div class="text-right">
-        <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-zinc-900 border border-zinc-800 text-sm">
-          <div class="w-2 h-2 bg-emerald-400 rounded-full animate-pulse"></div>
-          <span>Local only</span>
-        </div>
+        <!-- Connection status: green = live SSE, amber = reconnecting, red = down >5s / no API -->
+        <div id="conn-dot" class="inline-block w-3 h-3 rounded-full bg-amber-400 animate-pulse"
+             title="Connecting…"></div>
+        <!-- Populated by SSE for always-fresh global + per-device state + live stats -->
+        <div id="global-status" class="mt-2 text-[11px] text-emerald-400 font-mono"></div>
       </div>
-    </div>
-
-    <!-- SECTION 1: Browser Live Previews (WHAT YOU ASKED FOR) -->
-    <div class="mb-10">
-      <div class="flex items-center justify-between mb-4">
-        <div>
-          <h2 class="text-2xl font-semibold tracking-tight">Live Previews (in this browser)</h2>
-          <p class="text-zinc-400 text-sm">Plug in Mevo Start or any USB webcam → click Scan → see actual video here</p>
-        </div>
-        <button onclick="scanBrowserCameras()"
-                class="px-6 py-2.5 rounded-2xl bg-white text-black font-semibold hover:bg-zinc-200 active:bg-zinc-300 transition-colors">
-          Scan Devices
-        </button>
-      </div>
-
-      <div id="browser-previews" class="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <!-- Populated by JS -->
-      </div>
-
-      <div class="mt-3 text-xs text-zinc-500">
-        This uses your browser's native camera access (getUserMedia). Works great for Mevo Start in Webcam mode and normal USB webcams on both Windows and Linux.
-      </div>
-    </div>
-
-    <!-- SECTION 2: Server-side RTMP (existing pipeline) -->
-    <div class="mb-8">
-      <div class="flex items-center justify-between mb-4">
-        <div>
-          <h2 class="text-2xl font-semibold tracking-tight">Server Cameras (RTMP pipeline)</h2>
-          <p class="text-zinc-400 text-sm">These are the devices the backend can stream via MediaMTX / RTMP</p>
-        </div>
-        <button onclick="refreshServerCameras()"
-                class="px-5 py-2 rounded-2xl bg-zinc-800 hover:bg-zinc-700 text-sm font-medium transition-colors">
-          Refresh from Server
-        </button>
-      </div>
-
-      <div id="server-cameras" class="space-y-3"></div>
-      <div class="mt-2 text-xs text-zinc-500">Raw devices from the system are listed below. Click "Start RTMP Stream (local)" to activate a clean path (cam0, cam1...) which can then be used for GameChanger. Active ones show the clean path + "Use for GameChanger" button. Use "Show Viewer + QR" to get a phone-friendly web link/QR.</div>
-      <!-- Populated by SSE for always-fresh global + per-device state + live stats -->
-      <div id="global-status" class="mt-2 text-[11px] text-emerald-400 font-mono"></div>
     </div>
 
     <!-- GameChanger Direct Push -->
-    <div class="mb-8">
+    <div class="mb-10">
       <div class="flex items-center justify-between mb-4">
         <div>
-          <h2 class="text-2xl font-semibold tracking-tight">GameChanger Live</h2>
-          <p class="text-zinc-400 text-sm">Push one camera directly to GameChanger (no OBS). Must have an active local stream (cam0 etc.) first.</p>
+          <h2 class="text-2xl font-semibold tracking-tight">Stream to GameChanger</h2>
         </div>
       </div>
 
       <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
-        <div class="mb-4">
-          <label class="block text-xs text-zinc-400 mb-1">Camera (clean path)</label>
-          <select id="gc-camera" class="w-full bg-zinc-950 border border-zinc-700 rounded-xl px-3 py-2 text-sm">
-            <!-- populated by JS from active clean streams -->
-          </select>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+          <div>
+            <label class="block text-xs text-zinc-400 mb-1">Camera Device</label>
+            <select id="gc-camera" class="w-full bg-zinc-950 border border-zinc-700 rounded-xl px-3 py-2 text-sm">
+              <!-- populated by JS from active clean streams -->
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs text-zinc-400 mb-1">Quality</label>
+            <select id="gc-quality" onchange="setGlobalQuality(this.value)" class="w-full bg-zinc-950 border border-zinc-700 rounded-xl px-3 py-2 text-sm">
+              <option value="1080p">1080p (default)</option>
+              <option value="720p">720p (lower bitrate)</option>
+            </select>
+          </div>
         </div>
 
         <div class="mb-4">
           <label class="block text-xs text-amber-400 mb-1 font-medium">
             Full RTMP URL (recommended — paste exactly what GameChanger gives you)
           </label>
-          <input id="gc-full-url" type="text" 
+          <input id="gc-full-url" type="text"
                  placeholder="rtmp://601c62c19c9e.global-contribute.live-video.net/app/sk_...gc_ext=true"
                  class="w-full bg-zinc-950 border border-zinc-700 rounded-xl px-3 py-2 text-sm font-mono">
           <div class="text-[10px] text-zinc-500 mt-1">
@@ -111,22 +79,53 @@
         </div>
 
         <div class="flex items-center gap-3">
-          <button onclick="startGameChanger()" 
+          <button onclick="startGameChanger()"
                   class="px-6 py-2 rounded-2xl bg-emerald-600 hover:bg-emerald-500 font-semibold text-sm">
             Start GameChanger Stream
           </button>
-          <button onclick="stopGameChangerAndRefresh()" 
-                  class="px-6 py-2 rounded-2xl bg-red-600 hover:bg-red-500 font-semibold text-sm">
+          <button id="gc-stop-btn" onclick="stopGameChangerAndRefresh()"
+                  class="hidden px-6 py-2 rounded-2xl bg-red-600 hover:bg-red-500 font-semibold text-sm">
             Stop
           </button>
-          <div id="gc-status" class="text-sm text-zinc-400 ml-2"></div>
         </div>
       </div>
     </div>
 
-    <div class="text-[10px] text-zinc-600 border-t border-zinc-900 pt-4">
-      "Start RTMP Stream" uses the Go backend + MediaMTX. It will download MediaMTX + ffmpeg on first use (~150MB).
-      Use the "Show Viewer + QR" button for a browser-friendly link (http://your-lan-ip:8080/watch/cam0) that works great when scanned on a phone.
+    <!-- SECTION 2: Server-side RTMP (existing pipeline) -->
+    <div class="mb-8">
+      <div class="flex items-center justify-between mb-4">
+        <div>
+          <h2 class="text-2xl font-semibold tracking-tight">Available cameras</h2>
+        </div>
+        <button onclick="refreshServerCameras()"
+                class="px-5 py-2 rounded-2xl bg-zinc-800 hover:bg-zinc-700 text-sm font-medium transition-colors">
+          Refresh from Server
+        </button>
+      </div>
+
+      <div id="server-cameras" class="space-y-3"></div>
+    </div>
+
+    <!-- SECTION 1: Browser Live Previews -->
+    <div class="mb-10">
+      <div class="flex items-center justify-between mb-4">
+        <div>
+          <h2 class="text-2xl font-semibold tracking-tight">Camera Device Test</h2>
+          <p class="text-zinc-400 text-sm">Plug in Mevo Start or any USB webcam → click Scan → see actual video here</p>
+        </div>
+        <button onclick="scanBrowserCameras()"
+                class="px-6 py-2.5 rounded-2xl bg-white text-black font-semibold hover:bg-zinc-200 active:bg-zinc-300 transition-colors">
+          Scan Devices
+        </button>
+      </div>
+
+      <div id="browser-previews" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <!-- Populated by JS -->
+      </div>
+
+      <div class="mt-3 text-xs text-zinc-500">
+        This uses your browser's native camera access (getUserMedia). Works great for Mevo Start in Webcam mode and normal USB webcams on both Windows and Linux.
+      </div>
     </div>
   </div>
 
@@ -369,21 +368,11 @@ function applyServerStatus(update) {
   renderServerCameras();
   updateGlobalStatusBar(update);
 
-  // Keep the GameChanger form's #gc-status in sync with server state changes (SSE).
-  // This ensures that after starting GC (or when it ends via remote close), the "Starting..."/"Active"/"Idle"
-  // text next to the buttons reflects reality even if the direct response path or poll hasn't fired yet.
-  const gcStatusEl = document.getElementById('gc-status');
-  if (gcStatusEl && update.global) {
-    if (update.global.gcActive) {
-      gcStatusEl.textContent = `Active → ${update.global.gcPath || update.global.gcActiveRaw || 'GC'}`;
-      gcStatusEl.className = 'text-sm text-emerald-400 ml-2';
-    } else if (gcStatusEl.textContent.indexOf('Starting...') === -1 &&
-               gcStatusEl.textContent.indexOf('Failed:') === -1 &&
-               gcStatusEl.textContent.indexOf('Network Error') === -1) {
-      // Only auto-idle if not in a transient user-facing state from the direct start/stop click handlers.
-      gcStatusEl.textContent = 'Idle';
-      gcStatusEl.className = 'text-sm text-zinc-400 ml-2';
-    }
+  // Stop button only visible when GC is actually streaming (per global SSE state).
+  // Idle/streaming status is shown by the top-right global status bar, not here.
+  const gcStopBtn = document.getElementById('gc-stop-btn');
+  if (gcStopBtn && update.global) {
+    gcStopBtn.classList.toggle('hidden', !update.global.gcActive);
   }
 }
 
@@ -392,23 +381,110 @@ function updateGlobalStatusBar(update) {
   if (!el || !update || !update.global) return;
   const g = update.global;
   let txt = `mediaMTX: ${g.mediaMTXReady ? 'ready' : 'starting'} • ${g.activeIngests || 0} live ingest(s)`;
-  if (g.gcActive) {
-    txt += ` • SENDING → ${g.gcPath || g.gcActiveRaw || 'GC'}`;
+  if (g.gcQuality) {
+    txt += ` • quality: ${g.gcQuality}`;
   }
+  if (g.gcActive) {
+    txt += ` • GC: streaming → ${g.gcPath || g.gcActiveRaw || 'GC'}`;
+  } else {
+    txt += ` • GC: idle`;
+  }
+  __lastStatusText = txt;
   el.textContent = txt;
+  // We have fresh data, so we're definitely connected — ensure live color.
+  el.classList.remove('text-amber-400', 'text-red-500');
+  el.classList.add('text-emerald-400');
+
+  // Keep the dropdown in sync with global state, but don't fight the user while they're choosing.
+  const qualityEl = document.getElementById('gc-quality');
+  if (qualityEl && g.gcQuality && document.activeElement !== qualityEl) {
+    qualityEl.value = g.gcQuality;
+  }
+}
+
+// ---- Connection status dot ----
+// green  = live SSE connection
+// amber  = connection lost / reconnecting (under 5s)
+// red    = lost for more than 5s, or never reached the API
+let __connLostSince = null;   // ms timestamp of when we lost the connection (null while connected)
+let __connDownTimer = null;   // fires 5s after a loss to escalate amber -> red
+let __connReconnect = null;   // 5s reconnect timer
+let __lastStatusText = '';    // last real status text, restored on (re)connect
+
+function setConnDot(state) {
+  const dot = document.getElementById('conn-dot');
+  if (dot) {
+    dot.classList.remove('bg-emerald-400', 'bg-amber-400', 'bg-red-500', 'animate-pulse');
+    if (state === 'connected') {
+      dot.classList.add('bg-emerald-400');
+      dot.title = 'Connected — live updates';
+    } else if (state === 'down') {
+      dot.classList.add('bg-red-500');
+      dot.title = 'Disconnected — no connection to server';
+    } else { // 'lost' / reconnecting
+      dot.classList.add('bg-amber-400', 'animate-pulse');
+      dot.title = 'Connection lost — reconnecting…';
+    }
+  }
+
+  // Mirror the connection state in the global status text.
+  const el = document.getElementById('global-status');
+  if (el) {
+    el.classList.remove('text-emerald-400', 'text-amber-400', 'text-red-500');
+    if (state === 'connected') {
+      // Restore live color and the last real status text immediately, instead of
+      // leaving the "reconnecting…" placeholder up until the next SSE event arrives.
+      el.classList.add('text-emerald-400');
+      el.textContent = __lastStatusText || 'connected';
+    } else if (state === 'down') {
+      el.classList.add('text-red-500');
+      el.textContent = 'disconnected — no connection to server';
+    } else { // 'lost' / reconnecting
+      el.classList.add('text-amber-400');
+      el.textContent = 'connection lost — reconnecting…';
+    }
+  }
+}
+
+function connOk() {
+  __connLostSince = null;
+  clearTimeout(__connDownTimer);
+  setConnDot('connected');
+}
+
+function connLost() {
+  // Keep the original loss timestamp so the 5s -> red escalation counts from the first failure.
+  if (__connLostSince === null) {
+    __connLostSince = Date.now();
+    clearTimeout(__connDownTimer);
+    __connDownTimer = setTimeout(() => {
+      if (__connLostSince !== null) setConnDot('down');
+    }, 5000);
+    setConnDot('lost');
+  } else if (Date.now() - __connLostSince >= 5000) {
+    setConnDot('down');
+  } else {
+    setConnDot('lost');
+  }
 }
 
 function connectStatusSSE() {
   if (window.__statusSSE) {
     try { window.__statusSSE.close(); } catch (_) {}
   }
+  clearTimeout(__connReconnect);
+  // We're attempting a connection — show amber and (on the first attempt) start the red countdown.
+  connLost();
+
   console.log('[SSE] connecting to /api/events for realtime state...');
   const es = new EventSource('/api/events');
   window.__statusSSE = es;
   es.onopen = () => {
     console.log('[SSE] connected to /api/events (realtime state updates active)');
+    connOk();
   };
   es.onmessage = (ev) => {
+    connOk();
     try {
       const data = JSON.parse(ev.data);
       console.log('[SSE] state change event received', {
@@ -423,7 +499,12 @@ function connectStatusSSE() {
     }
   };
   es.onerror = (e) => {
-    console.warn('[SSE] connection error (EventSource will auto-retry)', e);
+    console.warn('[SSE] connection error — will retry in 5s', e);
+    connLost();
+    try { es.close(); } catch (_) {}
+    // Deterministic retry every 5s (instead of EventSource's built-in backoff).
+    clearTimeout(__connReconnect);
+    __connReconnect = setTimeout(connectStatusSSE, 5000);
   };
 }
 
@@ -473,7 +554,7 @@ function renderServerCameras() {
     const active = rawToActive[cam.id];
     const live = liveDeviceMap[cam.id] || null; // full pushed state (stats, live gc, etc)
     const div = document.createElement('div');
-    div.className = 'bg-zinc-900 border border-zinc-800 rounded-2xl p-5 flex items-center gap-4';
+    div.className = 'bg-zinc-900 border border-zinc-800 rounded-2xl p-5 flex flex-col sm:flex-row sm:items-center gap-4';
 
     let actions = '';
     let gcActions = '';
@@ -566,7 +647,7 @@ function renderServerCameras() {
         <div class="text-xs text-zinc-500 font-mono">${cam.id}</div>
         ${statsHTML}
       </div>
-      <div class="flex items-center gap-2 text-right">${actions}</div>
+      <div class="flex flex-wrap items-center gap-2 sm:justify-end">${actions}</div>
     `;
     container.appendChild(div);
   });
@@ -667,7 +748,8 @@ async function restartGCWithLast(path, rawId, lastConfig) {
     console.error('restartGCWithLast: no cameraPath or rawId available');
     return;
   }
-  const payload = { cameraPath: cameraPath };
+  const qualityEl = document.getElementById('gc-quality');
+  const payload = { cameraPath: cameraPath, quality: qualityEl ? qualityEl.value : '1080p' };
   if (lastConfig.fullUrl) {
     payload.gcFullUrl = lastConfig.fullUrl;
   } else {
@@ -835,6 +917,22 @@ async function refreshGameChangerCameras() {
   }
 }
 
+// Push a quality change to the server as a global config change.
+// The server broadcasts the new state over SSE so every client's UI updates.
+async function setGlobalQuality(quality) {
+  try {
+    await fetch('/api/gamechanger/quality', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ quality })
+    });
+    // No local UI mutation needed — the SSE status broadcast updates the
+    // status line and keeps the dropdown in sync via updateGlobalStatusBar().
+  } catch (e) {
+    console.error('[quality] failed to set global quality', e);
+  }
+}
+
 async function startGameChanger() {
   const select = document.getElementById('gc-camera');
   const serverEl = document.getElementById('gc-server');
@@ -870,11 +968,13 @@ async function startGameChanger() {
   }
 
   try {
+    const qualityEl = document.getElementById('gc-quality');
     const payload = {
       cameraPath: cameraPath,
       gcServer: server,
       gcKey: key,
-      gcFullUrl: fullUrl || undefined
+      gcFullUrl: fullUrl || undefined,
+      quality: qualityEl ? qualityEl.value : '1080p'
     };
     console.log('[GameChanger] Sending start payload:', payload);
     const res = await fetch('/api/gamechanger/start', {

@@ -53,7 +53,40 @@ var (
 
 	// last used GC config per clean path, for easy restart
 	gcLastConfigs = make(map[string]GCConfig)
+
+	// gcQuality is the global broadcast quality for GameChanger pushes:
+	// "1080p" (default) or "720p". Set via the GC start request, surfaced in status.
+	gcQuality   = "1080p"
+	gcQualityMu sync.Mutex
 )
+
+// gcEncodeParams holds the GameChanger-recommended encoder settings for a quality.
+type gcEncodeParams struct {
+	scale   string // ffmpeg scale filter target, e.g. "1920:1080"
+	bv      string // target video bitrate
+	maxrate string
+	bufsize string
+	level   string // H.264 level
+}
+
+// gcParamsForQuality returns GameChanger best-practice encode settings for the
+// requested quality. Anything other than "720p" falls back to 1080p.
+func gcParamsForQuality(q string) gcEncodeParams {
+	if normalizeQuality(q) == "720p" {
+		// GameChanger best practice for 720p30: ~3500 kbps, level 3.1.
+		return gcEncodeParams{scale: "1280:720", bv: "3500k", maxrate: "4000k", bufsize: "4500k", level: "3.1"}
+	}
+	// Default 1080p30: ~6000 kbps, level 4.1.
+	return gcEncodeParams{scale: "1920:1080", bv: "6000k", maxrate: "7000k", bufsize: "8000k", level: "4.1"}
+}
+
+// normalizeQuality coerces user input to a supported value ("1080p" or "720p").
+func normalizeQuality(q string) string {
+	if strings.Contains(strings.ToLower(strings.TrimSpace(q)), "720") {
+		return "720p"
+	}
+	return "1080p"
+}
 
 var publicHost string // non-loopback IP for phone/LAN access (used for viewer URLs and QR codes)
 
@@ -462,6 +495,7 @@ type GlobalStatus struct {
 	GCActive      bool   `json:"gcActive"`
 	GCPath        string `json:"gcPath,omitempty"`
 	GCActiveRaw   string `json:"gcActiveRaw,omitempty"`
+	GCQuality     string `json:"gcQuality"` // global broadcast quality: "1080p" or "720p"
 }
 
 type DeviceStatus struct {
@@ -497,6 +531,9 @@ func buildStatusSnapshot() StatusSnapshot {
 	snap.Global.ActiveIngests = len(activeIngests)
 	snap.Global.GCActive = gcActive
 	snap.Global.GCPath = gcActivePath
+	gcQualityMu.Lock()
+	snap.Global.GCQuality = gcQuality
+	gcQualityMu.Unlock()
 
 	seen := map[string]bool{}
 	for path, info := range serverStreams {
@@ -600,8 +637,16 @@ func main() {
 		}
 	})
 
-	// Serve the dashboard (real file - we will embed later)
-	http.Handle("/", http.FileServer(http.Dir("web/dist")))
+	// Serve the dashboard (real file - we will embed later).
+	// Disable caching so UI iterations show up immediately on phones/browsers
+	// instead of serving a stale index.html.
+	dashboard := http.FileServer(http.Dir("web/dist"))
+	http.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		w.Header().Set("Pragma", "no-cache")
+		w.Header().Set("Expires", "0")
+		dashboard.ServeHTTP(w, r)
+	}))
 
 	// API
 	http.HandleFunc("/api/sources", sourcesHandler)
@@ -614,6 +659,7 @@ func main() {
 	http.HandleFunc("/api/gamechanger/start", gameChangerStartHandler)
 	http.HandleFunc("/api/gamechanger/stop", gameChangerStopHandler)
 	http.HandleFunc("/api/gamechanger/status", gameChangerStatusHandler)
+	http.HandleFunc("/api/gamechanger/quality", gameChangerQualityHandler)
 	http.HandleFunc("/api/active-streams", activeStreamsHandler)
 
 	// SSE realtime status (global + per device + live stats). UI connects once and stays fresh.
@@ -798,6 +844,7 @@ type gameChangerStartReq struct {
 	GcServer   string `json:"gcServer"`   // e.g. rtmp://ingest.gamechanger.io/live   (used only if GcFullUrl is empty)
 	GcKey      string `json:"gcKey"`      // the stream key from GameChanger app     (used only if GcFullUrl is empty)
 	GcFullUrl  string `json:"gcFullUrl"`  // full RTMP URL (takes precedence over server+key)
+	Quality    string `json:"quality"`    // broadcast quality: "1080p" (default) or "720p"
 }
 
 func gameChangerStartHandler(w http.ResponseWriter, r *http.Request) {
@@ -808,8 +855,13 @@ func gameChangerStartHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("[gamechanger] Start request received: cameraPath=%s, hasFullUrl=%v, gcServer=%s, gcKeyLen=%d",
-		req.CameraPath, req.GcFullUrl != "", req.GcServer, len(req.GcKey))
+	quality := normalizeQuality(req.Quality)
+	gcQualityMu.Lock()
+	gcQuality = quality
+	gcQualityMu.Unlock()
+
+	log.Printf("[gamechanger] Start request received: cameraPath=%s, hasFullUrl=%v, gcServer=%s, gcKeyLen=%d, quality=%s",
+		req.CameraPath, req.GcFullUrl != "", req.GcServer, len(req.GcKey), quality)
 
 	if req.CameraPath == "" {
 		log.Printf("[gamechanger] 400: cameraPath is required. received: %+v", req)
@@ -876,6 +928,8 @@ func gameChangerStartHandler(w http.ResponseWriter, r *http.Request) {
 	// Force 1080p output + 6Mbps target (GameChanger prefers 1080p for the app).
 	source := fmt.Sprintf("srt://127.0.0.1:8890?streamid=read:%s&latency=30000&mode=caller", path)
 
+	enc := gcParamsForQuality(quality)
+
 	args := []string{
 		"-fflags", "nobuffer",
 		"-flags", "low_delay",
@@ -885,15 +939,15 @@ func gameChangerStartHandler(w http.ResponseWriter, r *http.Request) {
 		"-analyzeduration", "1000000",
 		"-err_detect", "ignore_err",
 		"-i", source,
-		"-vf", "scale=1920:1080",
+		"-vf", "scale=" + enc.scale,
 		"-c:v", "libx264",
 		"-preset", "veryfast",
 		"-tune", "zerolatency",
 		"-profile:v", "high",
-		"-level", "4.1",
-		"-b:v", "6000k",
-		"-maxrate", "7000k",
-		"-bufsize", "8000k",
+		"-level", enc.level,
+		"-b:v", enc.bv,
+		"-maxrate", enc.maxrate,
+		"-bufsize", enc.bufsize,
 		"-g", "15",           // 0.5s GOP for lower latency (GC accepts it)
 		"-keyint_min", "15",
 		"-sc_threshold", "0",
@@ -1128,6 +1182,32 @@ func gameChangerStatusHandler(w http.ResponseWriter, r *http.Request) {
 		"camera": gcCamera,
 		"path":   gcActivePath,
 	})
+}
+
+// gameChangerQualityHandler sets the global broadcast quality ("1080p" or "720p").
+// This is a global server config change: it updates state and broadcasts to all
+// connected clients via SSE so every viewer's UI stays in sync.
+func gameChangerQualityHandler(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Quality string `json:"quality"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	quality := normalizeQuality(req.Quality)
+	gcQualityMu.Lock()
+	gcQuality = quality
+	gcQualityMu.Unlock()
+
+	log.Printf("[gamechanger] global quality set to %s", quality)
+
+	// Push the new global state to all clients.
+	broadcastStatus()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"quality": quality})
 }
 
 func activeStreamsHandler(w http.ResponseWriter, r *http.Request) {
