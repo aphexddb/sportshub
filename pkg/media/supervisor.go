@@ -70,7 +70,8 @@ rtmpAddress: :1935
 srt: yes
 srtAddress: :8890
 
-api: no
+api: yes
+apiAddress: 127.0.0.1:9997
 metrics: no
 webrtc: yes
 webrtcAddress: :8889
