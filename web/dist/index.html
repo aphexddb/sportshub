@@ -47,8 +47,9 @@
           <div>
             <label class="block text-xs text-zinc-400 mb-1">Quality</label>
             <select id="gc-quality" onchange="setGlobalQuality(this.value)" class="w-full bg-zinc-950 border border-zinc-700 rounded-xl px-3 py-2 text-sm">
-              <option value="1080p">1080p (default)</option>
-              <option value="720p">720p (lower bitrate)</option>
+              <option value="1080p">1080p · 6 Mbps (default, needs ~10+ Mbps up)</option>
+              <option value="720p">720p · 3.5 Mbps (needs ~6 Mbps up)</option>
+              <option value="480p">480p · 1.5 Mbps (weak upload / hotspot)</option>
             </select>
           </div>
         </div>
@@ -336,9 +337,14 @@ async function loadServerConfig() {
 }
 
 function applyServerStatus(update) {
-  if (!update || !Array.isArray(update.devices)) {
-    console.warn('[State] received invalid server status update', update);
+  if (!update) {
+    console.warn('[State] received empty server status update', update);
     return;
+  }
+  // Tolerate a missing/null devices list (e.g. when the last device stops) by
+  // treating it as empty — otherwise the UI would ignore the update and stay stale.
+  if (!Array.isArray(update.devices)) {
+    update.devices = [];
   }
 
   console.log('[State] applying state change from server', {
@@ -528,6 +534,17 @@ async function refreshServerCameras() {
   }
 }
 
+// Host to use for viewer/stream URLs. Always sourced from the server's detected LAN IP
+// (publicHost via /api/config) so the link is accurate regardless of how the browser
+// reached the app (e.g. via localhost). Never use the browser's hostname.
+function viewerHost() {
+  if (serverConfig.host && serverConfig.host !== 'localhost' && serverConfig.host !== '127.0.0.1') {
+    return serverConfig.host;
+  }
+  // Fallback only if the server hasn't reported a usable LAN IP yet.
+  return window.location.hostname || '127.0.0.1';
+}
+
 function renderServerCameras() {
   const container = document.getElementById('server-cameras');
   container.innerHTML = '';
@@ -583,25 +600,30 @@ function renderServerCameras() {
         `;
       }
 
-      // Inline mini QR linking straight to the live viewer page (replaces the old popup).
-      const host = serverConfig.host || '127.0.0.1';
-      const viewerUrl = `http://${host}:${serverConfig.port || 8080}/watch/${effPath}`;
+      // Inline QR linking straight to the live viewer page (replaces the old popup).
+      // Use the same host the site is loaded from (never localhost) so the URL works on phones.
+      const viewerUrl = `http://${viewerHost()}:${serverConfig.port || 8080}/watch/${effPath}`;
       const qrHTML = `
         <a href="${viewerUrl}" target="_blank" rel="noopener" title="Open live stream — ${viewerUrl}"
-           class="flex flex-col items-center shrink-0">
+           class="shrink-0">
           <img src="/api/qr?text=${encodeURIComponent(viewerUrl)}"
-               class="bg-white p-1 rounded-lg w-16 h-16" alt="Live stream QR">
-          <span class="text-[10px] text-emerald-400 mt-0.5">Stream video live</span>
+               class="bg-white p-1.5 rounded-lg w-32 h-32" alt="Live stream QR">
         </a>
       `;
 
       actions = `
         ${gcActions}
         ${qrHTML}
-        <button onclick="stopServerStreamByPath('${effPath}')"
-                class="px-3 py-1 text-xs rounded-2xl bg-red-600 hover:bg-red-500 font-medium">
-          Stop Device
-        </button>
+        <div class="flex flex-col gap-2">
+          <button onclick="stopServerStreamByRaw('${(live && live.rawId) || cam.id}')"
+                  class="px-3 py-1 text-xs rounded-2xl bg-red-600 hover:bg-red-500 font-medium">
+            Stop Device
+          </button>
+          <a href="${viewerUrl}" target="_blank" rel="noopener"
+             class="px-3 py-1 text-xs rounded-2xl bg-zinc-800 hover:bg-zinc-700 font-medium text-center">
+            View Stream
+          </a>
+        </div>
       `;
     } else if (effGCLast) {
       // last-only (synthetic or from push) for a device with no current local path
@@ -674,21 +696,25 @@ async function startServerStream(cameraId) {
   }
 }
 
-async function stopServerStreamByPath(path) {
-  console.log('[LocalStream] stopping local stream by path', { path });
-  // Find the raw camera ID for this path
-  const info = activeCleanStreams.find(s => s.path === path);
-  if (!info) {
-    console.error('[LocalStream] could not find stream for path', path);
-    return alert('Could not find stream');
+// Stop a device's local stream (and, server-side, any GameChanger push using it)
+// by its stable raw device id. We pass the rawId straight from the rendered card
+// instead of resolving a clean path, which can be stale/out-of-sync via SSE.
+async function stopServerStreamByRaw(rawId) {
+  console.log('[LocalStream] stopping device by rawId', { rawId });
+  if (!rawId) {
+    console.error('[LocalStream] stopServerStreamByRaw called without rawId');
+    return;
   }
-
-  await fetch('/api/stream/stop', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ cameraId: info.rawId })
-  });
-  console.log('[LocalStream] local stream stopped for path', path);
+  try {
+    const res = await fetch('/api/stream/stop', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cameraId: rawId })
+    });
+    if (!res.ok) console.error('[LocalStream] stop failed', res.status);
+  } catch (e) {
+    console.error('[LocalStream] stop request error', e);
+  }
   await refreshServerCameras();
 }
 

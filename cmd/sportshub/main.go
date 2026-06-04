@@ -71,17 +71,29 @@ type gcEncodeParams struct {
 // gcParamsForQuality returns GameChanger best-practice encode settings for the
 // requested quality. Anything other than "720p" falls back to 1080p.
 func gcParamsForQuality(q string) gcEncodeParams {
-	if normalizeQuality(q) == "720p" {
-		// GameChanger best practice for 720p30: ~3500 kbps, level 3.1.
-		return gcEncodeParams{scale: "1280:720", bv: "3500k", maxrate: "4000k", bufsize: "4500k", level: "3.1"}
+	// GameChanger ingests RTMP and redelivers as HLS (~10-20s viewer latency), so it
+	// expects a stable, near-CBR feed. We set maxrate == bv and bufsize == bv (1s VBV)
+	// to mimic OBS "CBR", which GameChanger's own OBS guide recommends.
+	switch normalizeQuality(q) {
+	case "480p":
+		// 480p30: ~1500 kbps, level 3.0. For weak field upload (~4 Mbps up) where GC
+		// advises a stable low quality over a stuttering high one.
+		return gcEncodeParams{scale: "854:480", bv: "1500k", maxrate: "1500k", bufsize: "1500k", level: "3.0"}
+	case "720p":
+		// 720p30: ~3500 kbps (GoPro GC default is 2500; 3500 gives motion headroom), level 3.1.
+		return gcEncodeParams{scale: "1280:720", bv: "3500k", maxrate: "3500k", bufsize: "3500k", level: "3.1"}
 	}
-	// Default 1080p30: ~6000 kbps, level 4.1.
-	return gcEncodeParams{scale: "1920:1080", bv: "6000k", maxrate: "7000k", bufsize: "8000k", level: "4.1"}
+	// Default 1080p30: ~6000 kbps (top of GC's recommended range), level 4.1.
+	return gcEncodeParams{scale: "1920:1080", bv: "6000k", maxrate: "6000k", bufsize: "6000k", level: "4.1"}
 }
 
 // normalizeQuality coerces user input to a supported value ("1080p" or "720p").
 func normalizeQuality(q string) string {
-	if strings.Contains(strings.ToLower(strings.TrimSpace(q)), "720") {
+	s := strings.ToLower(strings.TrimSpace(q))
+	if strings.Contains(s, "480") {
+		return "480p"
+	}
+	if strings.Contains(s, "720") {
 		return "720p"
 	}
 	return "1080p"
@@ -475,6 +487,10 @@ func broadcastStatus() {
 
 func buildStatusSnapshot() StatusSnapshot {
 	snap := StatusSnapshot{Ts: time.Now()}
+	// Always emit a (possibly empty) array, never null — otherwise the client's
+	// Array.isArray(devices) guard rejects the update and the UI shows stale state
+	// when the last device is stopped.
+	snap.Devices = []DeviceStatus{}
 
 	activeIngests := media.GetActiveIngests()
 	ingestStats := media.GetStreamStats()
@@ -738,11 +754,12 @@ func stopStreamHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	mu.Unlock()
 
-	setLocalDemand(req.CameraID, false)
-
-	// If this path was the one sending to GC, stop the GC push too
-	if stoppedPath != "" && stoppedPath == gcActivePath {
-		gcMu.Lock()
+	// If this device was the one sending to GameChanger, kill that push and clear GC
+	// state first. We also clear the GC *demand* below so the capture can be torn down —
+	// otherwise cleanupCapture sees a lingering GC demand and leaves ffmpeg running.
+	gcMu.Lock()
+	wasGC := stoppedPath != "" && stoppedPath == gcActivePath
+	if wasGC {
 		if gcCmd != nil {
 			_ = gcCmd.Process.Kill()
 			gcCmd = nil
@@ -750,9 +767,19 @@ func stopStreamHandler(w http.ResponseWriter, r *http.Request) {
 		gcActivePath = ""
 		gcActive = false
 		gcCamera = ""
-		gcMu.Unlock()
-		log.Printf("[gamechanger] Stopped because local stream %s was stopped", stoppedPath)
 	}
+	gcMu.Unlock()
+	if wasGC {
+		setGCDemand(req.CameraID, false)
+		log.Printf("[gamechanger] Stopped because device %s was stopped", req.CameraID)
+	}
+
+	// Clear local demand last so cleanupCapture sees both demands off and actually
+	// stops the ffmpeg ingest for this device.
+	setLocalDemand(req.CameraID, false)
+
+	// Authoritative final broadcast so every SSE client reflects the stopped state.
+	broadcastStatus()
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"ok": true})
@@ -896,21 +923,27 @@ func gameChangerStartHandler(w http.ResponseWriter, r *http.Request) {
 		"-err_detect", "ignore_err",
 		"-i", source,
 		"-vf", "scale=" + enc.scale,
+		"-r", "30", // Lock output to 30fps so the GOP below is a deterministic 2s.
 		"-c:v", "libx264",
-		"-preset", "veryfast",
-		"-tune", "zerolatency",
+		// No "-tune zerolatency" here: GameChanger redelivers over HLS (~10-20s viewer
+		// latency), so low-latency tuning only costs quality. We let libx264 use B-frames
+		// and lookahead for better quality-per-bit. "faster" preset is a modest quality
+		// bump over "veryfast" while staying comfortably real-time for a single 1080p30 encode.
+		"-preset", "faster",
 		"-profile:v", "high",
 		"-level", enc.level,
 		"-b:v", enc.bv,
 		"-maxrate", enc.maxrate,
 		"-bufsize", enc.bufsize,
-		"-g", "15",           // 0.5s GOP for lower latency (GC accepts it)
-		"-keyint_min", "15",
-		"-sc_threshold", "0",
+		"-g", "60", // 2s GOP @ 30fps — the RTMP->HLS ingest standard; aligns segment boundaries.
+		"-keyint_min", "60",
+		"-sc_threshold", "0", // Fixed-cadence keyframes (no scene-cut IDRs) for clean HLS segments.
 		"-pix_fmt", "yuv420p",
 		"-c:a", "aac",
-		"-b:a", "128k",
+		"-profile:a", "aac_low", // AAC-LC: required for RTMP/HLS compatibility.
+		"-b:a", "160k",          // Top of GC's 128-160k range; cheap given the video savings.
 		"-ar", "48000",
+		"-ac", "2", // Force stereo so single-channel field mics still produce a valid stereo track.
 		"-f", "flv",
 		dest,
 	}
