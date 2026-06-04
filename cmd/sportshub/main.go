@@ -330,44 +330,80 @@ func watchHandler(w http.ResponseWriter, r *http.Request) {
     .meta { margin-top:12px; font-size:0.75rem; color:#666; word-break:break-all; text-align:center; }
     .btn { margin-top:12px; padding:10px 18px; background:#222; color:#ddd; border:1px solid #333; border-radius:8px; cursor:pointer; }
     .btn:hover { background:#333; }
+    .status { font-size:0.8rem; color:#0f0; margin:8px 0; }
   </style>
 </head>
 <body>
   <h1>Live • %s</h1>
+  <div id="status" class="status">Connecting (WebRTC for low latency)...</div>
   <video id="video" autoplay controls playsinline muted></video>
-  <div class="meta">HLS stream: %s<br>RTMP (for OBS/VLC): %s</div>
+  <div class="meta">WebRTC (low-latency): port 8889<br>HLS (higher latency): %s<br>RTMP (for OBS/VLC): %s</div>
   <button class="btn" onclick="const v=document.getElementById('video'); if(v.requestFullscreen) v.requestFullscreen(); else if(v.webkitRequestFullscreen) v.webkitRequestFullscreen();">Fullscreen</button>
 
   <script src="/static/hls.min.js"></script>
   <script>
-    // Full HLS playback support using embedded hls.js for broad browser compatibility
-    // (including non-Safari browsers on LAN without internet). Falls back to native HLS.
     const video = document.getElementById('video');
-    const src = '%s';
-    if (typeof Hls !== 'undefined' && Hls.isSupported()) {
-      const hls = new Hls({ enableWorker: true, lowLatencyMode: true, backBufferLength: 30 });
-      hls.loadSource(src);
-      hls.attachMedia(video);
-      hls.on(Hls.Events.MANIFEST_PARSED, function() {
-        video.play().catch(function(){});
-      });
-      hls.on(Hls.Events.ERROR, function(event, data) {
-        if (data.fatal) {
-          console.error('HLS fatal error, falling back to native', data);
-          video.src = src;
-        }
-      });
-    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-      video.src = src;
-      video.addEventListener('loadedmetadata', function() {
-        video.play().catch(function(){});
-      });
-    } else {
-      video.src = src;
+    const statusEl = document.getElementById('status');
+    const path = '%s';
+    const webrtcUrl = 'http://%s:8889/' + path + '/whep';
+    const hlsUrl = '%s';
+
+    async function startWebRTC() {
+      try {
+        const pc = new RTCPeerConnection();
+        pc.ontrack = (event) => {
+          if (event.streams && event.streams[0]) {
+            video.srcObject = event.streams[0];
+            statusEl.textContent = 'Playing via WebRTC (low latency)';
+            video.play().catch(() => {});
+          }
+        };
+        pc.onconnectionstatechange = () => {
+          statusEl.textContent = 'WebRTC state: ' + pc.connectionState;
+        };
+
+        const offer = await pc.createOffer({
+          offerToReceiveVideo: true,
+          offerToReceiveAudio: true
+        });
+        await pc.setLocalDescription(offer);
+
+        const res = await fetch(webrtcUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/sdp' },
+          body: offer.sdp
+        });
+
+        if (!res.ok) throw new Error('WHEP failed: ' + res.status);
+
+        const answerSdp = await res.text();
+        await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
+      } catch (err) {
+        console.error('WebRTC failed, falling back to HLS:', err);
+        statusEl.textContent = 'WebRTC failed, using HLS...';
+        startHLSFallback();
+      }
     }
+
+    function startHLSFallback() {
+      if (typeof Hls !== 'undefined' && Hls.isSupported()) {
+        const hls = new Hls({ enableWorker: true, lowLatencyMode: true, backBufferLength: 8, maxBufferLength: 12 });
+        hls.loadSource(hlsUrl);
+        hls.attachMedia(video);
+        hls.on(Hls.Events.MANIFEST_PARSED, () => { video.play().catch(()=>{}); });
+      } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+        video.src = hlsUrl;
+        video.addEventListener('loadedmetadata', () => { video.play().catch(()=>{}); });
+      } else {
+        video.src = hlsUrl;
+      }
+    }
+
+    // Prefer WebRTC for ~1s latency on local LAN
+    startWebRTC();
   </script>
 </body>
-</html>`, streamPath, streamPath, hlsURL, rtmpURL, hlsURL)
+</html>`, streamPath, streamPath, hlsURL, rtmpURL, streamPath, publicHost, hlsURL)
 
 	fmt.Fprint(w, page)
 }
@@ -838,14 +874,13 @@ func gameChangerStartHandler(w http.ResponseWriter, r *http.Request) {
 	// Build a GameChanger-friendly ffmpeg command.
 	// Pull clean feed from local MediaMTX (now 1080p30 from ingest) and re-encode with settings that GameChanger wants.
 	// Force 1080p output + 6Mbps target (GameChanger prefers 1080p for the app).
-	source := fmt.Sprintf("srt://127.0.0.1:8890?streamid=read:%s&latency=100000&mode=caller", path)
+	source := fmt.Sprintf("srt://127.0.0.1:8890?streamid=read:%s&latency=30000&mode=caller", path)
 
 	args := []string{
 		"-fflags", "nobuffer",
 		"-flags", "low_delay",
-		// These must be high enough for ffmpeg to parse H.264 SPS/PPS + resolution from
-		// the mpegts over SRT. Too low (the old 32/0) causes "unspecified size" / "not enough frames"
-		// and the video stream gets dropped — only audio reaches GameChanger.
+		"-avioflags", "direct",
+		// Probesize/analyzeduration kept reasonably high for reliable H.264 param detection on SRT input.
 		"-probesize", "500000",
 		"-analyzeduration", "1000000",
 		"-err_detect", "ignore_err",
@@ -853,13 +888,14 @@ func gameChangerStartHandler(w http.ResponseWriter, r *http.Request) {
 		"-vf", "scale=1920:1080",
 		"-c:v", "libx264",
 		"-preset", "veryfast",
+		"-tune", "zerolatency",
 		"-profile:v", "high",
 		"-level", "4.1",
 		"-b:v", "6000k",
 		"-maxrate", "7000k",
-		"-bufsize", "9000k",
-		"-g", "30",           // lower GOP for lower latency (1s at 30fps); GC accepts it
-		"-keyint_min", "30",
+		"-bufsize", "8000k",
+		"-g", "15",           // 0.5s GOP for lower latency (GC accepts it)
+		"-keyint_min", "15",
 		"-sc_threshold", "0",
 		"-pix_fmt", "yuv420p",
 		"-c:a", "aac",

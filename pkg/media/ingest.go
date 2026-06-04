@@ -166,6 +166,7 @@ func StartIngestForCamera(cameraID, streamPath string) error {
 		"-framerate", "30",
 		"-use_wallclock_as_timestamps", "1",
 		"-err_detect", "ignore_err",
+		"-fflags", "nobuffer",
 		"-i", inputSpec,
 		"-c:v", "libx264",
 		"-preset", "veryfast",
@@ -181,7 +182,9 @@ func StartIngestForCamera(cameraID, streamPath string) error {
 		"-b:a", "128k",
 		"-ar", "48000",
 		"-f", "mpegts",
-		fmt.Sprintf("srt://127.0.0.1:8890?streamid=publish:%s&latency=100000&mode=caller", streamPath),
+		// latency is in microseconds; loopback is lossless so a small 30ms buffer is plenty
+		// and avoids adding needless delay to every downstream consumer.
+		fmt.Sprintf("srt://127.0.0.1:8890?streamid=publish:%s&latency=30000&mode=caller", streamPath),
 	}
 
 	log.Printf("[ingest] Starting ffmpeg for device: %s → path: %s", cameraID, streamPath)

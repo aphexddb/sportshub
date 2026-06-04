@@ -72,12 +72,20 @@ srtAddress: :8890
 
 api: no
 metrics: no
-webrtc: no
+webrtc: yes
+webrtcAddress: :8889
+webrtcAllowOrigin: '*'
 rtsp: no
 
 hls: yes
 hlsAddress: :8888
 hlsAllowOrigin: '*'
+# Low-Latency HLS so the browser fallback (and iOS Safari, which can't use WebRTC here)
+# stays within ~1-2s instead of the 10-15s the default mpegts variant buffers.
+hlsVariant: lowLatency
+hlsSegmentCount: 7
+hlsSegmentDuration: 1s
+hlsPartDuration: 200ms
 
 paths:
   all:
@@ -135,7 +143,14 @@ paths:
 		log.Printf("[mediamtx] HLS port 8888 is ready")
 	}
 
-	log.Printf("[mediamtx] MediaMTX is ready (RTMP + SRT + HLS)")
+	// Wait for WebRTC (for low-latency local viewing via /watch/)
+	if err := waitForPort("tcp", "127.0.0.1:8889", 10*time.Second); err != nil {
+		log.Printf("[mediamtx] WARNING: WebRTC port 8889 not ready after start: %v", err)
+	} else {
+		log.Printf("[mediamtx] WebRTC port 8889 is ready")
+	}
+
+	log.Printf("[mediamtx] MediaMTX is ready (RTMP + SRT + HLS + WebRTC)")
 
 	mtxReadyMu.Lock()
 	mtxReady = true
