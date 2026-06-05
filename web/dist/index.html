@@ -14,10 +14,12 @@
 <body class="bg-zinc-950 text-white">
   <!-- Boot loading overlay: shown on load and driven by the SSE `init` state until the
        server reports boot complete (ports freed, ffmpeg ready, media server up). HTTP serves
-       first so this appears instantly instead of the user staring at a blank page. -->
-  <div id="boot-overlay" class="fixed inset-0 z-50 flex flex-col items-center justify-center bg-zinc-950">
-    <div class="w-12 h-12 border-4 border-zinc-700 border-t-emerald-400 rounded-full animate-spin"></div>
-    <div id="boot-msg" class="mt-5 text-zinc-300 text-sm font-mono">Starting…</div>
+       first so this appears instantly instead of the user staring at a blank page. On a boot
+       error the overlay stays up, turns red, and stops the spinner. -->
+  <div id="boot-overlay" class="fixed inset-0 z-50 flex flex-col items-center justify-center bg-zinc-950 text-center px-6">
+    <div id="boot-spinner" class="w-12 h-12 border-4 border-zinc-700 border-t-emerald-400 rounded-full animate-spin"></div>
+    <div id="boot-title" class="mt-6 text-lg font-semibold tracking-tight">Starting sportshub…</div>
+    <div id="boot-msg" class="mt-2 text-zinc-400 text-sm font-mono max-w-md">Starting…</div>
     <div id="boot-checks" class="mt-3 text-[11px] text-zinc-500 font-mono text-center leading-5"></div>
   </div>
 
@@ -352,15 +354,32 @@ async function loadServerConfig() {
 function updateBootOverlay(init) {
   const overlay = document.getElementById('boot-overlay');
   if (!overlay) return;
-  if (!init || init.done) {
+  // Boot succeeded → reveal the app.
+  if (init && init.done) {
     overlay.style.display = 'none';
     return;
   }
   overlay.style.display = 'flex';
+
+  const titleEl = document.getElementById('boot-title');
   const msg = document.getElementById('boot-msg');
-  if (msg) msg.textContent = init.error ? ('Startup error: ' + init.error) : (init.phase || 'Starting…');
+  const spinner = document.getElementById('boot-spinner');
   const checksEl = document.getElementById('boot-checks');
-  if (checksEl && Array.isArray(init.checks)) {
+  const hasError = !!(init && init.error);
+
+  if (titleEl) {
+    titleEl.textContent = hasError ? 'Startup failed' : 'Starting sportshub…';
+    titleEl.classList.toggle('text-red-500', hasError);
+  }
+  if (msg) {
+    msg.textContent = hasError ? init.error : ((init && init.phase) || 'Starting…');
+    msg.classList.toggle('text-red-500', hasError);
+    msg.classList.toggle('text-zinc-400', !hasError);
+  }
+  // Stop the spinner on error to signal it's stuck (not just slow).
+  if (spinner) spinner.classList.toggle('animate-spin', !hasError);
+
+  if (checksEl && init && Array.isArray(init.checks)) {
     checksEl.innerHTML = init.checks.map(c => {
       const icon = c.status === 'ok' ? '✓' : c.status === 'error' ? '✕' : c.status === 'running' ? '…' : '·';
       return icon + ' ' + c.name + (c.detail ? (' — ' + c.detail) : '');

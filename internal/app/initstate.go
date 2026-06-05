@@ -58,12 +58,19 @@ func (b *bootState) fail(name, detail string) {
 	b.errMsg = detail
 }
 
-// finish marks boot complete; the spinner can hide.
+// finish completes the boot sequence. On success it marks Done (the spinner hides); if any
+// step failed it leaves Done false so the overlay stays up showing the error — a failed media
+// server / missing ffmpeg means the app can't stream, so revealing it would be misleading.
 func (b *bootState) finish() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.done = true
-	b.phase = "Ready"
+	if b.errMsg == "" {
+		b.done = true
+		b.phase = "Ready"
+	} else {
+		b.done = false
+		b.phase = "Startup failed"
+	}
 }
 
 // snapshot returns the current init state for inclusion in the SSE Snapshot.

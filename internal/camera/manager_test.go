@@ -107,6 +107,24 @@ func (f *fakeRestreamer) req() RestreamRequest {
 	return f.lastReq
 }
 
+// waitHandle blocks (briefly) until Start has created a handle, then returns it. The GC
+// phase flips to GCStarting before startGCNow commits the handle, so tests must wait for
+// the handle rather than reading the field right after observing GCStarting.
+func (f *fakeRestreamer) waitHandle() *fakeHandle {
+	for i := 0; i < 500; i++ {
+		f.mu.Lock()
+		h := f.handle
+		f.mu.Unlock()
+		if h != nil {
+			return h
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	return nil
+}
+
+func handleStopped(h *fakeHandle) bool { return h != nil && atomic.LoadInt32(&h.stopped) != 0 }
+
 // ---------------- helpers ----------------
 
 func newTestManager(media MediaServer, cap Capturer, re Restreamer) *Manager {
@@ -299,14 +317,16 @@ func TestStop_KillsGCHandleAndCapture(t *testing.T) {
 
 	m.StartGC(rawA, "Cam A", "rtmp://dest", status.GCConfig{})
 	waitGC(t, m, rawA, GCStarting)
-	h := re.handle
+	h := re.waitHandle()
+	if h == nil {
+		t.Fatal("restreamer never produced a handle")
+	}
 
 	m.Stop(rawA)
 	waitState(t, m, rawA, StateIdle)
 
-	if atomic.LoadInt32(&h.stopped) == 0 {
-		t.Fatal("GC handle should have been stopped")
-	}
+	// The handle is killed either inline by Stop or by startGCNow's supersede path, so wait.
+	eventually(t, time.Second, func() bool { return handleStopped(h) }, "GC handle stopped")
 	if cap.stopCount(rawA) == 0 {
 		t.Fatal("capture should have been stopped")
 	}
@@ -322,14 +342,15 @@ func TestStopGC_KeepsLocalWhenStillWanted(t *testing.T) {
 	waitState(t, m, rawA, StateLive)
 	m.StartGC(rawA, "Cam A", "rtmp://dest", status.GCConfig{})
 	waitGC(t, m, rawA, GCStarting)
-	h := re.handle
+	h := re.waitHandle()
+	if h == nil {
+		t.Fatal("restreamer never produced a handle")
+	}
 
 	m.StopGC(rawA)
 	waitGC(t, m, rawA, GCIdle)
 
-	if atomic.LoadInt32(&h.stopped) == 0 {
-		t.Fatal("GC handle should have been stopped")
-	}
+	eventually(t, time.Second, func() bool { return handleStopped(h) }, "GC handle stopped")
 	if s, _, _ := snap(m, rawA); s != StateLive {
 		t.Fatalf("capture should remain Live after StopGC, got %s", s)
 	}

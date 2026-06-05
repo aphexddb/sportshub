@@ -131,13 +131,19 @@ func (a *App) runBoot() {
 	a.broadcast()
 
 	// 3. Ensure ffmpeg is available (downloads it on Windows the first time; PATH lookup elsewhere).
+	//    Surface the downloader's fine-grained progress into the spinner message live.
 	a.boot.start("binaries", "Checking media tools (ffmpeg)…")
+	ffmpeg.SetProgress(func(msg string) {
+		a.boot.start("binaries", msg)
+		a.broadcast()
+	})
 	if _, err := ffmpeg.Path(); err != nil {
 		a.boot.fail("binaries", err.Error())
 		log.Printf("[boot] ffmpeg not ready: %v", err)
 	} else {
 		a.boot.ok("binaries")
 	}
+	ffmpeg.SetProgress(nil)
 	a.broadcast()
 
 	// 4. Start the in-process MediaMTX media server.

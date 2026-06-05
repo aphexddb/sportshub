@@ -23,6 +23,7 @@ func ensureFFmpeg() (string, error) {
 
 	path := filepath.Join(binDir, "ffmpeg.exe")
 	if _, err := os.Stat(path); err == nil {
+		reportProgress("ffmpeg already present")
 		return path, nil // already have it
 	}
 
@@ -35,6 +36,7 @@ func ensureFFmpeg() (string, error) {
 		url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
 	}
 
+	reportProgress("Downloading ffmpeg (~100MB, first run only)…")
 	fmt.Println("Downloading ffmpeg (one-time, ~100MB+ — this will take a minute)...")
 	zipPath := filepath.Join(binDir, "ffmpeg.zip")
 	if err := downloadFile(url, zipPath); err != nil {

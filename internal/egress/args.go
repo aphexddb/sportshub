@@ -2,9 +2,16 @@ package egress
 
 import (
 	"fmt"
+	"strings"
 
 	"sportshub2/internal/encode"
 )
+
+// isRTMPS reports whether dest is a secure RTMP-over-TLS URL (rtmps://...). The scheme check
+// is case-insensitive and tolerant of leading whitespace in the operator-supplied value.
+func isRTMPS(dest string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(dest)), "rtmps://")
+}
 
 // srtReadURL builds the local SRT pull URL for a published path.
 func srtReadURL(srtPort int, streamPath string) string {
@@ -14,9 +21,16 @@ func srtReadURL(srtPort int, streamPath string) string {
 // buildGCArgs builds the GameChanger restream ffmpeg command: SRT pull → re-encode (per the
 // quality's GameChanger-recommended near-CBR settings) → FLV to the destination. dest is
 // passed through verbatim, so both rtmp:// and rtmps:// destinations are supported.
+//
+// The bundled ffmpeg is built with TLS (schannel on Windows, OpenSSL elsewhere), so its native
+// RTMP implementation negotiates TLS for rtmps:// over the system trust store with no extra
+// flags. A real push to the AWS IVS / live-video.net contribute endpoint completed the TLS +
+// RTMP connect/publish exchange with certificate verification at its secure default, so we do
+// NOT pass "-tls_verify 0" (it would weaken the push for no benefit). For rtmps we add a 15s
+// read/write timeout so a half-open TLS handshake fails fast instead of hanging the push.
 func buildGCArgs(streamPath, dest string, enc encode.Params, srtPort int) []string {
 	source := srtReadURL(srtPort, streamPath)
-	return []string{
+	args := []string{
 		"-fflags", "nobuffer",
 		"-flags", "low_delay",
 		// NOTE: never "-avioflags direct" on SRT input — it forces tiny unbuffered reads that
@@ -44,6 +58,15 @@ func buildGCArgs(streamPath, dest string, enc encode.Params, srtPort int) []stri
 		"-ar", "48000",
 		"-ac", "2",
 		"-f", "flv",
-		dest,
 	}
+
+	// For secure rtmps destinations, add a read/write timeout (15s, in microseconds) so a
+	// half-open TLS handshake fails fast instead of hanging the push goroutine. Per-stream
+	// option: it must precede the output URL.
+	if isRTMPS(dest) {
+		args = append(args, "-rw_timeout", "15000000")
+	}
+
+	args = append(args, dest)
+	return args
 }

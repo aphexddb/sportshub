@@ -53,6 +53,37 @@ func TestBuildGCArgs_RTMPSPassthrough(t *testing.T) {
 	if fIdx < 0 || args[fIdx+1] != "flv" {
 		t.Fatalf("expected -f flv output, got %v", args)
 	}
+	// rtmps gets a read/write timeout (15s in microseconds) as the flag/value pair right
+	// before the dest: [..., "-rw_timeout", "15000000", dest].
+	rwIdx := indexOf(args, "-rw_timeout")
+	if rwIdx < 0 || args[rwIdx+1] != "15000000" {
+		t.Fatalf("expected -rw_timeout 15000000 for rtmps, got %v", args)
+	}
+	if rwIdx != len(args)-3 {
+		t.Fatalf("-rw_timeout/value must immediately precede the dest, got %v", args)
+	}
+}
+
+func TestBuildGCArgs_PlainRTMP_NoRWTimeout(t *testing.T) {
+	args := buildGCArgs("cam0", "rtmp://ingest.example/app/key", encode.ParamsFor("1080p"), 8890)
+	if indexOf(args, "-rw_timeout") >= 0 {
+		t.Fatalf("plain rtmp:// must NOT get -rw_timeout, got %v", args)
+	}
+}
+
+func TestIsRTMPS(t *testing.T) {
+	cases := map[string]bool{
+		"rtmps://h:443/a/k": true,
+		"  RTMPS://h/a":     true,
+		"rtmp://h/a":        false,
+		"rtmpst://h/a":      false,
+		"":                  false,
+	}
+	for in, want := range cases {
+		if got := isRTMPS(in); got != want {
+			t.Errorf("isRTMPS(%q) = %v, want %v", in, got, want)
+		}
+	}
 }
 
 func TestUpdateStats_MergesNonZero(t *testing.T) {

@@ -29,12 +29,25 @@ func TestBootState_Sequence(t *testing.T) {
 		t.Fatalf("media failure not recorded: %+v err=%q", s.Checks[1], s.Error)
 	}
 
+	// A failed step means finish() must NOT mark Done (overlay stays up on error).
 	b.finish()
-	if s = b.snapshot(); !s.Done || s.Phase != "Ready" {
-		t.Fatalf("should be done and Ready: %+v", s)
+	if s = b.snapshot(); s.Done || s.Phase != "Startup failed" {
+		t.Fatalf("a failed boot must not be Done: %+v", s)
 	}
 	// Check ordering is preserved.
 	if s.Checks[0].Name != "ports" || s.Checks[1].Name != "media" {
 		t.Fatalf("check order not preserved: %+v", s.Checks)
+	}
+}
+
+func TestBootState_SuccessIsDone(t *testing.T) {
+	b := newBootState("ports", "media")
+	b.start("ports", "Freeing ports…")
+	b.ok("ports")
+	b.start("media", "Starting media server…")
+	b.ok("media")
+	b.finish()
+	if s := b.snapshot(); !s.Done || s.Phase != "Ready" || s.Error != "" {
+		t.Fatalf("a clean boot must be Done/Ready with no error: %+v", s)
 	}
 }

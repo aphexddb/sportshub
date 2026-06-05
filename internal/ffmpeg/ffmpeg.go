@@ -8,12 +8,38 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 const (
 	dataDirName = "sportshub"
 	binDirName  = "bin"
 )
+
+var (
+	progressMu sync.RWMutex
+	progressFn func(msg string)
+)
+
+// SetProgress registers a callback used to report fine-grained acquisition progress (e.g.
+// "Downloading ffmpeg (~100MB, first run only)…" vs "ffmpeg already present"). The app wires
+// this into the boot state so the loading spinner reflects a long first-run download live.
+// Pass nil to clear.
+func SetProgress(fn func(msg string)) {
+	progressMu.Lock()
+	progressFn = fn
+	progressMu.Unlock()
+}
+
+// reportProgress invokes the registered progress callback if any.
+func reportProgress(msg string) {
+	progressMu.RLock()
+	fn := progressFn
+	progressMu.RUnlock()
+	if fn != nil {
+		fn(msg)
+	}
+}
 
 // BinDir returns (creating it) the directory where managed binaries live.
 // It prefers os.UserCacheDir and falls back to os.TempDir. Works on all OSes.
