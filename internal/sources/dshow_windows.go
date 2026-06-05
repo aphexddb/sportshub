@@ -9,12 +9,12 @@ import (
 	"os/exec"
 	"strings"
 
-	"sportshub2/pkg/media"
+	"sportshub2/internal/ffmpeg"
 )
 
 // listCamerasImpl is the Windows implementation (called from sources.go)
 func listCamerasImpl() ([]Camera, error) {
-	ffmpegPath, err := media.GetFFmpegPath()
+	ffmpegPath, err := ffmpeg.Path()
 	if err != nil {
 		return []Camera{{
 			ID:   "ffmpeg-missing",
@@ -50,7 +50,8 @@ func listCamerasImpl() ([]Camera, error) {
 
 // parseDSHOWOutput handles both old and new ffmpeg dshow output formats.
 // Newer builds (like the one we download) output lines like:
-//   [in#0 @ ...] "Logitech BRIO" (video)
+//
+//	[in#0 @ ...] "Logitech BRIO" (video)
 func parseDSHOWOutput(output []byte) []Camera {
 	var cams []Camera
 	scanner := bufio.NewScanner(bytes.NewReader(output))

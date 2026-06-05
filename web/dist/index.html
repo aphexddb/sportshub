@@ -12,15 +12,13 @@
   </style>
 </head>
 <body class="bg-zinc-950 text-white">
-  <!-- Full-screen boot overlay. Visible by default (before SSE connects) so there is never
-       a flash of the un-booted app. Hidden once the server reports initReady=true. If the
-       server reports an init error, the message is shown in red and the overlay stays up. -->
-  <div id="boot-overlay"
-       class="fixed inset-0 z-50 flex flex-col items-center justify-center bg-zinc-950 text-center px-6">
-    <div id="boot-spinner"
-         class="w-12 h-12 rounded-full border-4 border-zinc-700 border-t-emerald-400 animate-spin"></div>
-    <div id="boot-title" class="mt-6 text-lg font-semibold tracking-tight">Starting sportshub…</div>
-    <div id="boot-message" class="mt-2 text-sm text-zinc-400 font-mono max-w-md">Starting up…</div>
+  <!-- Boot loading overlay: shown on load and driven by the SSE `init` state until the
+       server reports boot complete (ports freed, ffmpeg ready, media server up). HTTP serves
+       first so this appears instantly instead of the user staring at a blank page. -->
+  <div id="boot-overlay" class="fixed inset-0 z-50 flex flex-col items-center justify-center bg-zinc-950">
+    <div class="w-12 h-12 border-4 border-zinc-700 border-t-emerald-400 rounded-full animate-spin"></div>
+    <div id="boot-msg" class="mt-5 text-zinc-300 text-sm font-mono">Starting…</div>
+    <div id="boot-checks" class="mt-3 text-[11px] text-zinc-500 font-mono text-center leading-5"></div>
   </div>
 
   <div class="max-w-6xl mx-auto p-4 sm:p-8">
@@ -67,13 +65,15 @@
 
         <div class="mb-4">
           <label class="block text-xs text-amber-400 mb-1 font-medium">
-            Full RTMP URL (recommended — paste exactly what GameChanger gives you)
+            Full RTMP / RTMPS URL (recommended — paste exactly what GameChanger gives you)
           </label>
           <input id="gc-full-url" type="text"
-                 placeholder="rtmp://601c62c19c9e.global-contribute.live-video.net/app/sk_...gc_ext=true"
+                 placeholder="rtmps://601c62c19c9e.global-contribute.live-video.net:443/app/sk_...gc_ext=true"
                  class="w-full bg-zinc-950 border border-zinc-700 rounded-xl px-3 py-2 text-sm font-mono">
           <div class="text-[10px] text-zinc-500 mt-1">
             If you paste a full URL here, it will be used and the two fields below will be ignored.
+            Both insecure <span class="font-mono">rtmp://</span> and secure
+            <span class="font-mono">rtmps://</span> (TLS, usually port 443) are supported.
           </div>
         </div>
 
@@ -347,11 +347,33 @@ async function loadServerConfig() {
   }
 }
 
+// Show/hide the boot loading spinner based on the server's init state. Hides once boot is
+// complete (or already complete on reconnect), so the dashboard is only revealed when ready.
+function updateBootOverlay(init) {
+  const overlay = document.getElementById('boot-overlay');
+  if (!overlay) return;
+  if (!init || init.done) {
+    overlay.style.display = 'none';
+    return;
+  }
+  overlay.style.display = 'flex';
+  const msg = document.getElementById('boot-msg');
+  if (msg) msg.textContent = init.error ? ('Startup error: ' + init.error) : (init.phase || 'Starting…');
+  const checksEl = document.getElementById('boot-checks');
+  if (checksEl && Array.isArray(init.checks)) {
+    checksEl.innerHTML = init.checks.map(c => {
+      const icon = c.status === 'ok' ? '✓' : c.status === 'error' ? '✕' : c.status === 'running' ? '…' : '·';
+      return icon + ' ' + c.name + (c.detail ? (' — ' + c.detail) : '');
+    }).join('<br>');
+  }
+}
+
 function applyServerStatus(update) {
   if (!update) {
     console.warn('[State] received empty server status update', update);
     return;
   }
+  updateBootOverlay(update.init);
   // Tolerate a missing/null devices list (e.g. when the last device stops) by
   // treating it as empty — otherwise the UI would ignore the update and stay stale.
   if (!Array.isArray(update.devices)) {
@@ -382,7 +404,6 @@ function applyServerStatus(update) {
       gcLast: d.gcLast || null
     }));
 
-  updateBootOverlay(update);
   renderServerCameras();
   updateGlobalStatusBar(update);
 
@@ -392,47 +413,6 @@ function applyServerStatus(update) {
   if (gcStopBtn && update.global) {
     gcStopBtn.classList.toggle('hidden', !update.global.gcActive);
   }
-}
-
-// updateBootOverlay drives the full-screen boot spinner from the server's init state.
-// While initReady is false the overlay stays up with the latest initMessage; once
-// initReady is true it is hidden, revealing the app. An init error keeps the overlay
-// up and shows the message in red.
-function updateBootOverlay(update) {
-  const overlay = document.getElementById('boot-overlay');
-  if (!overlay) return;
-  const g = (update && update.global) || {};
-
-  if (g.initError) {
-    const titleEl = document.getElementById('boot-title');
-    const msgEl = document.getElementById('boot-message');
-    const spinner = document.getElementById('boot-spinner');
-    if (titleEl) {
-      titleEl.textContent = 'Startup failed';
-      titleEl.classList.add('text-red-500');
-    }
-    if (msgEl) {
-      msgEl.textContent = g.initError;
-      msgEl.classList.remove('text-zinc-400');
-      msgEl.classList.add('text-red-500');
-    }
-    // Stop spinning to signal it's stuck (not just slow).
-    if (spinner) spinner.classList.remove('animate-spin');
-    overlay.classList.remove('hidden');
-    return;
-  }
-
-  if (g.initReady) {
-    overlay.classList.add('hidden');
-    return;
-  }
-
-  // Still booting: update the message and keep the overlay visible.
-  const msgEl = document.getElementById('boot-message');
-  if (msgEl && g.initMessage) {
-    msgEl.textContent = g.initMessage;
-  }
-  overlay.classList.remove('hidden');
 }
 
 function updateGlobalStatusBar(update) {

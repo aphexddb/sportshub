@@ -1,0 +1,43 @@
+package app
+
+import "net/http"
+
+// routes builds the HTTP mux. The paths and methods exactly match the contract the web UI
+// in web/dist/index.html depends on.
+func (a *App) routes() *http.ServeMux {
+	mux := http.NewServeMux()
+
+	// Dashboard (served from disk). Disable caching so UI iterations show up immediately
+	// on phones/browsers instead of serving a stale index.html.
+	dashboard := http.FileServer(http.Dir("web/dist"))
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		w.Header().Set("Pragma", "no-cache")
+		w.Header().Set("Expires", "0")
+		dashboard.ServeHTTP(w, r)
+	})
+
+	// Core API
+	mux.HandleFunc("/api/sources", a.handleSources)
+	mux.HandleFunc("/api/stream/start", a.handleStreamStart)
+	mux.HandleFunc("/api/stream/stop", a.handleStreamStop)
+	mux.HandleFunc("/api/status", a.handleStatus)
+	mux.HandleFunc("/api/qr", a.handleQR)
+
+	// GameChanger direct push
+	mux.HandleFunc("/api/gamechanger/start", a.handleGCStart)
+	mux.HandleFunc("/api/gamechanger/stop", a.handleGCStop)
+	mux.HandleFunc("/api/gamechanger/status", a.handleGCStatus)
+	mux.HandleFunc("/api/gamechanger/quality", a.handleGCQuality)
+	mux.HandleFunc("/api/active-streams", a.handleActiveStreams)
+
+	// SSE realtime status
+	mux.HandleFunc("/api/events", a.handleEvents)
+
+	// Public config + viewer page + embedded hls.js
+	mux.HandleFunc("/api/config", a.handleConfig)
+	mux.HandleFunc("/watch/", a.handleWatch)
+	mux.HandleFunc("/static/hls.min.js", a.handleHLSJS)
+
+	return mux
+}
