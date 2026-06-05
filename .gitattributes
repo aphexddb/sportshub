@@ -1,0 +1,7 @@
+# Keep shell scripts, the systemd unit, and config files LF-only — CRLF would break the
+# shebang/parsing when they're packaged into the .deb/.rpm/.apk or run on Linux.
+*.sh        text eol=lf
+*.service   text eol=lf
+*.yaml      text eol=lf
+*.yml       text eol=lf
+Makefile    text eol=lf

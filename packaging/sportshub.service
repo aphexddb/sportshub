@@ -1,0 +1,20 @@
+[Unit]
+Description=SportsHub live streaming server
+Documentation=https://github.com/aphexddb/sportshub
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/sportshub
+Restart=on-failure
+RestartSec=3
+# Assets are embedded in the binary, so no WorkingDirectory is needed.
+# Runs as root so libcamera/rpicam (CSI cameras) and the media ports are accessible out of the
+# box on a Raspberry Pi. Tighten to a dedicated user in the video/render groups if desired.
+User=root
+# A live stream can use real CPU; don't let the OOM killer pick it first, but don't pin it.
+Nice=-2
+
+[Install]
+WantedBy=multi-user.target

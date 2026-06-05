@@ -1,15 +1,19 @@
 package app
 
-import "net/http"
+import (
+	"net/http"
+
+	"sportshub2/web"
+)
 
 // routes builds the HTTP mux. The paths and methods exactly match the contract the web UI
 // in web/dist/index.html depends on.
 func (a *App) routes() *http.ServeMux {
 	mux := http.NewServeMux()
 
-	// Dashboard (served from disk). Disable caching so UI iterations show up immediately
-	// on phones/browsers instead of serving a stale index.html.
-	dashboard := http.FileServer(http.Dir("web/dist"))
+	// Dashboard. Assets are embedded in the binary (or served from disk with -tags dev).
+	// Disable caching so UI iterations show up immediately on phones/browsers.
+	dashboard := http.FileServer(http.FS(web.Dist()))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 		w.Header().Set("Pragma", "no-cache")

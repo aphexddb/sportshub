@@ -1,0 +1,84 @@
+# GoReleaser config — build, package, and release sportshub for every platform.
+# Local dry run (no publish, full matrix + packages in ./dist):  goreleaser release --snapshot --clean
+# Validate this file:                                            goreleaser check
+# Real release (CI does this on a git tag):                      goreleaser release --clean
+version: 2
+
+project_name: sportshub
+
+before:
+  hooks:
+    - go mod download
+
+builds:
+  - id: sportshub
+    main: ./cmd/sportshub
+    binary: sportshub
+    env:
+      - CGO_ENABLED=0 # pure Go: no cross-toolchains needed, fully static binaries
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+      - -X main.commit={{ .Commit }}
+      - -X main.date={{ .CommitDate }}
+    mod_timestamp: "{{ .CommitTimestamp }}" # reproducible builds
+    goos: [linux, windows, darwin]
+    goarch: [amd64, arm64]
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - docs/*
+
+checksum:
+  name_template: checksums.txt
+
+# Linux system packages. The Raspberry Pi target is the arm64 .deb: it pulls ffmpeg, installs
+# the binary to /usr/bin, ships the systemd unit, and enables+starts the service on install.
+nfpms:
+  - id: linux-packages
+    package_name: sportshub
+    vendor: SportsHub
+    homepage: https://github.com/aphexddb/sportshub
+    maintainer: Gardiner <aphexddb@gmail.com>
+    description: SportsHub — native in-process media server for live streaming (RTMP/SRT/HLS/WebRTC) with GameChanger push.
+    license: Proprietary
+    formats: [deb, rpm, apk]
+    bindir: /usr/bin
+    dependencies:
+      - ffmpeg
+    contents:
+      - src: packaging/sportshub.service
+        dst: /lib/systemd/system/sportshub.service
+    scripts:
+      postinstall: packaging/postinstall.sh
+      preremove: packaging/preremove.sh
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot-{{ .ShortCommit }}"
+
+changelog:
+  use: git
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+release:
+  # Set explicitly so a release works before an "origin" remote is configured locally.
+  # Adjust owner/name to match the actual GitHub repo you push to.
+  github:
+    owner: aphexddb
+    name: sportshub
+  draft: true # review the release before publishing
+  prerelease: auto

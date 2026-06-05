@@ -32,3 +32,8 @@ go.work.sum
 # .vscode/
 
 *.log
+
+# Build output
+/dist/
+/bin/sportshub
+/bin/sportshub.exe

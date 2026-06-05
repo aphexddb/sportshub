@@ -27,8 +27,9 @@ import (
 
 // Config holds the externally-provided inputs to the app.
 type Config struct {
-	HLSJS []byte // embedded hls.min.js served at /static/hls.min.js
-	Port  string // listen address for the dashboard/API, e.g. ":8080"
+	HLSJS   []byte // embedded hls.min.js served at /static/hls.min.js
+	Port    string // listen address for the dashboard/API, e.g. ":8080"
+	Version string // build version, surfaced at /api/status
 }
 
 // App is the running application: services + HTTP wiring.

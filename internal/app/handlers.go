@@ -32,9 +32,13 @@ func (a *App) handleSources(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleStatus(w http.ResponseWriter, r *http.Request) {
+	version := a.cfg.Version
+	if version == "" {
+		version = "dev"
+	}
 	writeJSON(w, map[string]string{
 		"mode":    "spike",
-		"version": "0.0.1-dev",
+		"version": version,
 		"os":      runtime.GOOS,
 	})
 }

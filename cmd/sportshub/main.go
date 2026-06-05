@@ -12,8 +12,17 @@ import (
 //go:embed static/hls.min.js
 var hlsJS []byte
 
+// Build metadata, stamped at release time via -ldflags (see .goreleaser.yaml). Defaults are
+// used for `go build`/`go run` so a dev build is clearly labelled.
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
 func main() {
-	a := app.New(app.Config{HLSJS: hlsJS, Port: ":8080"})
+	log.Printf("sportshub %s (commit %s, built %s)", version, commit, date)
+	a := app.New(app.Config{HLSJS: hlsJS, Port: ":8080", Version: version})
 	if err := a.Run(); err != nil {
 		log.Fatal(err)
 	}
