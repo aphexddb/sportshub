@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os/exec"
 
+	"sportshub2/internal/devices"
 	"sportshub2/internal/ffmpeg"
 )
 
@@ -16,10 +17,11 @@ func buildCaptureCmd(rawID string, srtPort int, streamPath string) (*exec.Cmd, e
 	if err != nil {
 		return nil, fmt.Errorf("ffmpeg unavailable: %w", err)
 	}
+	p := devices.ProfileFor(devices.KindStub)
 	spec := InputSpec{
 		Format:   "lavfi",
 		PreInput: nil,
-		Input:    "testsrc=size=1920x1080:rate=30",
+		Input:    fmt.Sprintf("testsrc=size=%dx%d:rate=%d", p.Width, p.Height, p.FPS),
 	}
 	return exec.Command(ffmpegPath, buildIngestArgs(spec, srtPort, streamPath)...), nil
 }

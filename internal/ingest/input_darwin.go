@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os/exec"
 
+	"sportshub2/internal/devices"
 	"sportshub2/internal/ffmpeg"
 )
 
@@ -20,9 +21,10 @@ func buildCaptureCmd(rawID string, srtPort int, streamPath string) (*exec.Cmd, e
 	if rawID == "" {
 		rawID = "0"
 	}
+	p := devices.ProfileFor(devices.KindAVFoundation)
 	spec := InputSpec{
 		Format:   "avfoundation",
-		PreInput: []string{"-framerate", "30", "-video_size", "1920x1080"},
+		PreInput: []string{"-framerate", fmt.Sprintf("%d", p.FPS), "-video_size", fmt.Sprintf("%dx%d", p.Width, p.Height)},
 		Input:    rawID,
 	}
 	return exec.Command(ffmpegPath, buildIngestArgs(spec, srtPort, streamPath)...), nil

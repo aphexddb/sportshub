@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"sportshub2/internal/devices"
 	"sportshub2/internal/ffmpeg"
 )
 
@@ -110,8 +111,11 @@ func parseAVFoundationOutput(output []byte) []Camera {
 		}
 
 		cams = append(cams, Camera{
-			ID:   idx,
-			Name: name,
+			ID:       idx,
+			Name:     name,
+			Kind:     string(devices.KindAVFoundation),
+			Model:    name,
+			Location: "avfoundation",
 		})
 	}
 

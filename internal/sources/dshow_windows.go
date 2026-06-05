@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"sportshub2/internal/devices"
 	"sportshub2/internal/ffmpeg"
 )
 
@@ -88,8 +89,11 @@ func parseDSHOWOutput(output []byte) []Camera {
 						continue
 					}
 					cams = append(cams, Camera{
-						ID:   "video=" + name,
-						Name: name,
+						ID:       "video=" + name,
+						Name:     name,
+						Kind:     string(devices.KindDShow),
+						Model:    name,
+						Location: "DirectShow",
 					})
 				}
 			}
@@ -108,8 +112,11 @@ func parseDSHOWOutput(output []byte) []Camera {
 						continue
 					}
 					cams = append(cams, Camera{
-						ID:   "video=" + name,
-						Name: name,
+						ID:       "video=" + name,
+						Name:     name,
+						Kind:     string(devices.KindDShow),
+						Model:    name,
+						Location: "DirectShow",
 					})
 				}
 			}

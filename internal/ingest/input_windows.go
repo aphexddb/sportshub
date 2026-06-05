@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"sportshub2/internal/devices"
 	"sportshub2/internal/ffmpeg"
 )
 
@@ -26,9 +27,10 @@ func buildCaptureCmd(rawID string, srtPort int, streamPath string) (*exec.Cmd, e
 	}
 	videoName := input[6:] // strip "video="
 	audioName := "Microphone (" + videoName + ")"
+	p := devices.ProfileFor(devices.KindDShow)
 	spec := InputSpec{
 		Format:   "dshow",
-		PreInput: []string{"-rtbufsize", "200M", "-video_size", "1920x1080", "-framerate", "30"},
+		PreInput: []string{"-rtbufsize", "200M", "-video_size", fmt.Sprintf("%dx%d", p.Width, p.Height), "-framerate", fmt.Sprintf("%d", p.FPS)},
 		Input:    "video=" + videoName + ":audio=" + audioName,
 	}
 	return exec.Command(ffmpegPath, buildIngestArgs(spec, srtPort, streamPath)...), nil
