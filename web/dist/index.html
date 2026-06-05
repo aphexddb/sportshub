@@ -93,7 +93,7 @@
         </div>
 
         <div class="flex items-center gap-3">
-          <button onclick="startGameChanger()"
+          <button id="gc-start-btn" onclick="startGameChanger()"
                   class="px-6 py-2 rounded-2xl bg-emerald-600 hover:bg-emerald-500 font-semibold text-sm">
             Start GameChanger Stream
           </button>
@@ -428,22 +428,14 @@ function applyServerStatus(update) {
       gcLast: d.gcLast || null
     }));
 
+  // Server SSE state is the source of truth. Clear any optimistic "pending" flags whose
+  // transition the server has now confirmed, then render buttons from the real state.
+  lastUpdate = update;
+  reconcilePending(update.devices);
+
   renderServerCameras();
   updateGlobalStatusBar(update);
-
-  // Stop button only visible when GC is actually streaming (per global SSE state).
-  // Idle/streaming status is shown by the top-right global status bar, not here.
-  const gcStopBtn = document.getElementById('gc-stop-btn');
-  if (gcStopBtn && update.global) {
-    gcStopBtn.classList.toggle('hidden', !update.global.gcActive);
-  }
-  // "Watch GC feed" link → the local preview of exactly what's pushed to GameChanger.
-  const gcWatch = document.getElementById('gc-watch-link');
-  if (gcWatch && update.global) {
-    const active = !!update.global.gcActive;
-    gcWatch.classList.toggle('hidden', !active);
-    if (active && update.global.gcPath) gcWatch.href = '/watch/' + update.global.gcPath + 'gc';
-  }
+  syncTopGCControls(update);
 }
 
 function updateGlobalStatusBar(update) {
@@ -609,6 +601,87 @@ function viewerHost() {
   return window.location.hostname || '127.0.0.1';
 }
 
+// ---- Optimistic transition state ----
+// The server SSE feed (state: idle/starting/live/stopping/error, gcPhase: idle/starting/
+// streaming/error) is the source of truth for button states. pendingAction adds an instant
+// optimistic layer so a button shows "loading" the moment it's clicked, before the first SSE
+// confirmation arrives; reconcilePending() clears each entry once the server confirms (or after
+// a safety timeout) so the UI can never get stuck in a fake loading state.
+let lastUpdate = null;
+const pendingAction = {}; // rawId -> { kind:'gc'|'dev', want:'start'|'stop', until:ms }
+
+function pendingFor(rawId) { return pendingAction[rawId] || null; }
+
+function setPendingAction(rawId, kind, want) {
+  if (!rawId) return;
+  pendingAction[rawId] = { kind, want, until: Date.now() + 12000 };
+  renderServerCameras();
+  if (lastUpdate) syncTopGCControls(lastUpdate);
+}
+
+function reconcilePending(devices) {
+  const now = Date.now();
+  Object.keys(pendingAction).forEach(rawId => {
+    const p = pendingAction[rawId];
+    const d = devices.find(x => x.rawId === rawId);
+    let done = now > p.until; // safety timeout so we never get stuck
+    if (!done && p.kind === 'gc' && p.want === 'start') done = !!d && d.gcPhase !== 'idle';
+    else if (!done && p.kind === 'gc' && p.want === 'stop') done = !d || (d.gcPhase === 'idle' && !d.gcActive);
+    else if (!done && p.kind === 'dev' && p.want === 'start') done = !!d && d.state !== 'idle';
+    else if (!done && p.kind === 'dev' && p.want === 'stop') done = !d || d.state === 'idle' || d.state === 'error';
+    if (done) delete pendingAction[rawId];
+  });
+}
+
+// transitionLabel returns a loading label when a device is mid-transition (or has a pending
+// optimistic action), else null when it's settled and normal buttons should show.
+function transitionLabel(devState, gcPhase, pend) {
+  if (pend && pend.kind === 'gc') return pend.want === 'start' ? 'Starting GameChanger…' : 'Stopping GameChanger…';
+  if (pend && pend.kind === 'dev') return pend.want === 'start' ? 'Starting…' : 'Stopping…';
+  if (gcPhase === 'starting') return 'Starting GameChanger…';
+  if (devState === 'starting') return 'Starting…';
+  if (devState === 'stopping') return 'Stopping…';
+  return null;
+}
+
+function spinnerSVG() {
+  return '<span class="inline-block w-3 h-3 mr-1.5 align-[-1px] rounded-full border-2 border-white/30 border-t-white animate-spin"></span>';
+}
+function loadingBtn(label) {
+  return `<button disabled class="px-3 py-1 text-xs rounded-2xl bg-zinc-700 text-zinc-300 font-medium opacity-70 cursor-not-allowed inline-flex items-center">${spinnerSVG()}${label}</button>`;
+}
+
+// syncTopGCControls drives the top GameChanger Start/Stop buttons + the Watch-GC link from the
+// SSE state plus any pending GC action, so they disable/show "Starting…"/"Stopping…" too.
+function syncTopGCControls(update) {
+  const g = (update && update.global) || {};
+  const devices = (update && update.devices) || [];
+  const anyGCStarting = devices.some(d => d.gcPhase === 'starting') ||
+    Object.values(pendingAction).some(p => p.kind === 'gc' && p.want === 'start');
+  const anyGCStopping = Object.values(pendingAction).some(p => p.kind === 'gc' && p.want === 'stop');
+
+  const startBtn = document.getElementById('gc-start-btn');
+  if (startBtn) {
+    startBtn.disabled = anyGCStarting;
+    startBtn.classList.toggle('opacity-60', anyGCStarting);
+    startBtn.classList.toggle('cursor-not-allowed', anyGCStarting);
+    startBtn.textContent = anyGCStarting ? 'Starting…' : 'Start GameChanger Stream';
+  }
+  const stopBtn = document.getElementById('gc-stop-btn');
+  if (stopBtn) {
+    stopBtn.classList.toggle('hidden', !(g.gcActive || anyGCStopping));
+    stopBtn.disabled = anyGCStopping;
+    stopBtn.classList.toggle('opacity-60', anyGCStopping);
+    stopBtn.textContent = anyGCStopping ? 'Stopping…' : 'Stop';
+  }
+  const gcWatch = document.getElementById('gc-watch-link');
+  if (gcWatch) {
+    const active = !!g.gcActive;
+    gcWatch.classList.toggle('hidden', !active);
+    if (active && g.gcPath) gcWatch.href = '/watch/' + g.gcPath + 'gc';
+  }
+}
+
 function renderServerCameras() {
   const container = document.getElementById('server-cameras');
   container.innerHTML = '';
@@ -638,78 +711,59 @@ function renderServerCameras() {
     div.className = 'bg-zinc-900 border border-zinc-800 rounded-2xl p-5 flex flex-col sm:flex-row sm:items-center gap-4';
 
     let actions = '';
-    let gcActions = '';
-    // Prefer the live pushed state (from SSE) for gcActive / last / stats. Fall back to the activeCleanStreams snapshot.
+    // Button states are derived from the SSE state (+ optimistic pending), never optimistic-only.
+    const devState = live ? live.state : 'idle';      // idle/starting/live/stopping/error
+    const gcPhase  = live ? live.gcPhase : 'idle';     // idle/starting/streaming/error
     const effPath = (live && live.path) || (active && active.path) || '';
-    const hasCurrentPath = !!effPath;
-    const effGCActive = !!(live ? live.gcActive : (active && active.gcActive));
+    const effGCActive = gcPhase === 'streaming' || !!(live ? live.gcActive : (active && active.gcActive));
     const effGCLast = live ? live.gcLast : (active ? active.gcLast : null);
+    const rawIdForStop = (live && live.rawId) || cam.id;
+    const pend = pendingFor(cam.id);
+    const busyLabel = transitionLabel(devState, gcPhase, pend);
 
-    if (hasCurrentPath) {
-      gcActions = '';
+    const viewerUrl = `http://${viewerHost()}:${serverConfig.port || 8080}/watch/${effPath}`;
+    const qrHTML = effPath ? `
+        <a href="${viewerUrl}" target="_blank" rel="noopener" title="Open live stream — ${viewerUrl}" class="shrink-0">
+          <img src="/api/qr?text=${encodeURIComponent(viewerUrl)}" class="bg-white p-1.5 rounded-lg w-32 h-32" alt="Live stream QR">
+        </a>` : '';
+    const errHTML = (devState === 'error' && live && live.error)
+      ? `<span class="text-red-400 text-xs mr-1" title="${escAttr(live.error)}">error</span>` : '';
+
+    if (busyLabel) {
+      // A capture / GameChanger transition is underway — show a single loading button and
+      // disable everything else so it's clear the state is changing.
+      actions = `${loadingBtn(busyLabel)} ${qrHTML}`;
+    } else if (devState === 'live' || effPath) {
+      let gcActions = '';
       if (effGCActive) {
         gcActions = `
           <span class="text-emerald-400 text-xs font-medium mr-1">SENDING TO GC</span>
-          <button onclick="stopGameChangerAndRefresh()"
-                  class="px-3 py-1 text-xs rounded-2xl bg-red-600 hover:bg-red-500 font-medium">
-            STOP GC
-          </button>
-        `;
+          <button onclick="stopGameChangerAndRefresh('${rawIdForStop}')"
+                  class="px-3 py-1 text-xs rounded-2xl bg-red-600 hover:bg-red-500 font-medium">STOP GC</button>`;
       } else if (effGCLast) {
-        gcActions = `
-          <button onclick="restartGCWithLast('${effPath}', '${(live && live.rawId) || cam.id || ''}', ${escAttr(JSON.stringify(effGCLast))})"
-                  class="px-3 py-1 text-xs rounded-2xl bg-amber-600 hover:bg-amber-500 font-medium">
-            Restart GC (last)
-          </button>
-        `;
+        gcActions = `<button onclick="restartGCWithLast('${effPath}', '${rawIdForStop}', ${escAttr(JSON.stringify(effGCLast))})"
+                  class="px-3 py-1 text-xs rounded-2xl bg-amber-600 hover:bg-amber-500 font-medium">Restart GC (last)</button>`;
       }
-
-      // Inline QR linking straight to the live viewer page (replaces the old popup).
-      // Use the same host the site is loaded from (never localhost) so the URL works on phones.
-      const viewerUrl = `http://${viewerHost()}:${serverConfig.port || 8080}/watch/${effPath}`;
-      const qrHTML = `
-        <a href="${viewerUrl}" target="_blank" rel="noopener" title="Open live stream — ${viewerUrl}"
-           class="shrink-0">
-          <img src="/api/qr?text=${encodeURIComponent(viewerUrl)}"
-               class="bg-white p-1.5 rounded-lg w-32 h-32" alt="Live stream QR">
-        </a>
-      `;
-
       actions = `
         ${gcActions}
         ${qrHTML}
         <div class="flex flex-col gap-2">
-          <button onclick="stopServerStreamByRaw('${(live && live.rawId) || cam.id}')"
-                  class="px-3 py-1 text-xs rounded-2xl bg-red-600 hover:bg-red-500 font-medium">
-            Stop Device
-          </button>
+          <button onclick="stopServerStreamByRaw('${rawIdForStop}')"
+                  class="px-3 py-1 text-xs rounded-2xl bg-red-600 hover:bg-red-500 font-medium">Stop Device</button>
           <a href="${viewerUrl}" target="_blank" rel="noopener"
-             class="px-3 py-1 text-xs rounded-2xl bg-zinc-800 hover:bg-zinc-700 font-medium text-center">
-            View Stream
-          </a>
-        </div>
-      `;
+             class="px-3 py-1 text-xs rounded-2xl bg-zinc-800 hover:bg-zinc-700 font-medium text-center">View Stream</a>
+        </div>`;
     } else if (effGCLast) {
-      // last-only (synthetic or from push) for a device with no current local path
-      const r = cam.id;
-      gcActions = `
-        <button onclick="restartGCWithLast('', '${r}', ${escAttr(JSON.stringify(effGCLast))})" 
-                class="px-3 py-1 text-xs rounded-2xl bg-amber-600 hover:bg-amber-500 font-medium">
-          Restart GC (last)
-        </button>
-      `;
+      // Idle/error device with a remembered GC config.
       actions = `
-        ${gcActions}
-        <button onclick="startServerStream('${cam.id}')" 
-               class="px-4 py-1.5 text-xs rounded-2xl bg-white text-black font-semibold hover:bg-zinc-200">
-          Start Stream
-        </button>
-      `;
+        ${errHTML}
+        <button onclick="restartGCWithLast('', '${cam.id}', ${escAttr(JSON.stringify(effGCLast))})"
+                class="px-3 py-1 text-xs rounded-2xl bg-amber-600 hover:bg-amber-500 font-medium">Restart GC (last)</button>
+        <button onclick="startServerStream('${cam.id}')"
+                class="px-4 py-1.5 text-xs rounded-2xl bg-white text-black font-semibold hover:bg-zinc-200">Start Stream</button>`;
     } else {
-      actions = `<button onclick="startServerStream('${cam.id}')" 
-                 class="px-4 py-1.5 text-xs rounded-2xl bg-white text-black font-semibold hover:bg-zinc-200">
-        Start Stream
-      </button>`;
+      actions = `${errHTML}<button onclick="startServerStream('${cam.id}')"
+                 class="px-4 py-1.5 text-xs rounded-2xl bg-white text-black font-semibold hover:bg-zinc-200">Start Stream</button>`;
     }
 
     // Build optional live stats line (ingest + egress when GC pushing)
@@ -744,6 +798,7 @@ function renderServerCameras() {
 // Helper to start local RTMP from the old device list (kept for compatibility)
 async function startServerStream(cameraId) {
   console.log('[LocalStream] starting local RTMP stream', { cameraId });
+  setPendingAction(cameraId, 'dev', 'start');
   const res = await fetch('/api/stream/start', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -769,6 +824,7 @@ async function stopServerStreamByRaw(rawId) {
     console.error('[LocalStream] stopServerStreamByRaw called without rawId');
     return;
   }
+  setPendingAction(rawId, 'dev', 'stop');
   try {
     const res = await fetch('/api/stream/stop', {
       method: 'POST',
@@ -782,9 +838,16 @@ async function stopServerStreamByRaw(rawId) {
   await refreshServerCameras();
 }
 
-// Stop the current GC and refresh so the STOP GC button disappears for that device
-async function stopGameChangerAndRefresh() {
-  console.log('[GameChanger] stopping GC push from UI');
+// Stop the current GC and refresh so the STOP GC button disappears for that device.
+// rawId is optional (passed from a per-device STOP GC button); if omitted we derive the
+// currently-streaming device from the last SSE snapshot so the loading state shows.
+async function stopGameChangerAndRefresh(rawId) {
+  console.log('[GameChanger] stopping GC push from UI', { rawId });
+  if (!rawId && lastUpdate) {
+    const d = (lastUpdate.devices || []).find(x => x.gcActive || x.gcPhase === 'streaming' || x.gcPhase === 'starting');
+    rawId = d ? d.rawId : null;
+  }
+  if (rawId) setPendingAction(rawId, 'gc', 'stop');
   const res = await fetch('/api/gamechanger/stop', { method: 'POST' });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
@@ -826,6 +889,8 @@ async function restartGCWithLast(path, rawId, lastConfig) {
     console.error('restartGCWithLast: no cameraPath or rawId available');
     return;
   }
+  // Optimistic loading state on the device card (keyed by its stable raw id).
+  setPendingAction(rawId || (lastConfig && lastConfig.rawId) || cameraPath, 'gc', 'start');
   const qualityEl = document.getElementById('gc-quality');
   const payload = { cameraPath: cameraPath, quality: qualityEl ? qualityEl.value : '1080p' };
   if (lastConfig.fullUrl) {
@@ -850,6 +915,7 @@ async function restartGCWithLast(path, rawId, lastConfig) {
 
 async function startServerStream(cameraId) {
   console.log('[LocalStream] starting local RTMP stream', { cameraId });
+  setPendingAction(cameraId, 'dev', 'start');
   const res = await fetch('/api/stream/start', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -961,6 +1027,8 @@ async function startGameChanger() {
     statusEl.textContent = 'Starting...';
     statusEl.className = 'text-sm text-yellow-400 ml-2';
   }
+  // Optimistic loading state for the top button + the selected device card.
+  setPendingAction(cameraPath, 'gc', 'start');
 
   try {
     const qualityEl = document.getElementById('gc-quality');
