@@ -6,8 +6,12 @@ package app
 
 import (
 	"context"
+	"errors"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"sportshub2/internal/camera"
@@ -75,7 +79,22 @@ func (a *App) Run() error {
 	// port scanning / sleep). The fuller media-port cleanup happens during boot().
 	proc.KillStale()
 	a.host = netutil.PublicHost() // fast; needed before the page builds URLs
-	mux := a.routes()
+
+	srv := &http.Server{Addr: a.cfg.Port, Handler: a.routes()}
+
+	// Own the shutdown signal. The in-process MediaMTX core installs its OWN SIGINT/SIGTERM
+	// handler, and Go delivers a signal to every registered handler — so without our own
+	// handler, Ctrl+C shuts MediaMTX down but leaves our HTTP server (and the process)
+	// running. We catch it too, tear down captures + media, then close the server so
+	// ListenAndServe returns and the process exits.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		s := <-sigCh
+		log.Printf("[shutdown] %v received — stopping", s)
+		_ = a.Close()
+		_ = srv.Close()
+	}()
 
 	log.Printf("=== SportsHub ===")
 	log.Printf("Open http://%s%s (use this address from phones on the same LAN) or http://localhost%s", a.host, a.cfg.Port, a.cfg.Port)
@@ -93,7 +112,10 @@ func (a *App) Run() error {
 		}
 	}()
 
-	return http.ListenAndServe(a.cfg.Port, mux)
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
 }
 
 // runBoot runs the startup sequence, updating the init state and broadcasting it (also every
@@ -159,8 +181,12 @@ func (a *App) runBoot() {
 	log.Printf("[boot] startup complete")
 }
 
-// Close stops the media server (used on graceful shutdown / tests).
-func (a *App) Close() error { return a.media.Close() }
+// Close tears everything down: stop all camera captures / GC pushes (killing their ffmpeg
+// children) then stop the in-process media server. Safe to call once.
+func (a *App) Close() error {
+	a.cams.StopAll()
+	return a.media.Close()
+}
 
 // buildSnapshot assembles the full status view pushed over SSE / returned by /api/status views.
 func (a *App) buildSnapshot() status.Snapshot {

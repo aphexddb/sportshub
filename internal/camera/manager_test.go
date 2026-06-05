@@ -101,7 +101,19 @@ func (f *fakeRestreamer) Start(req RestreamRequest) (RestreamHandle, error) {
 	return f.handle, nil
 }
 
+// req returns the request passed to Start, waiting briefly for it: the GC phase flips to
+// GCStarting before startGCNow calls Start, so a test observing GCStarting may read the
+// request before it has been recorded.
 func (f *fakeRestreamer) req() RestreamRequest {
+	for i := 0; i < 500; i++ {
+		f.mu.Lock()
+		r := f.lastReq
+		f.mu.Unlock()
+		if r.RawID != "" {
+			return r
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.lastReq

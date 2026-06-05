@@ -259,6 +259,21 @@ func (m *Manager) Stop(rawID string) {
 	m.notify()
 }
 
+// StopAll tears down every known camera (kills each GC push + capture). Used on shutdown so
+// no ffmpeg child outlives the app. Snapshots the ids under the lock, then stops each without
+// holding it (Stop takes the lock itself).
+func (m *Manager) StopAll() {
+	m.mu.Lock()
+	ids := make([]string, 0, len(m.cams))
+	for id := range m.cams {
+		ids = append(ids, id)
+	}
+	m.mu.Unlock()
+	for _, id := range ids {
+		m.Stop(id)
+	}
+}
+
 // HandleIngestExit is called when a capture process exits. If we didn't initiate it
 // (state is Live/Starting, not Stopping), the camera died unexpectedly (e.g. unplugged) —
 // surface that as Error and drop demand. Wire this to the Capturer's exit callback.
