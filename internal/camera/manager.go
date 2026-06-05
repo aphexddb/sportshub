@@ -50,8 +50,22 @@ type RestreamRequest struct {
 	Path    string
 	Dest    string
 	Quality string
-	OnStats func(status.StreamStats)
-	OnExit  func(error)
+	// PreviewPath is a local media-server path the restreamer should also publish the
+	// re-encoded GameChanger feed to (a copy), so the UI can preview exactly what's being
+	// pushed. Empty means "no preview".
+	PreviewPath string
+	OnStats     func(status.StreamStats)
+	OnExit      func(error)
+}
+
+// egressPath is the local preview path for a camera's GameChanger feed (a copy of what's
+// pushed). Convention shared by startGCNow (where it's published) and Snapshot (where it's
+// exposed to the UI).
+func egressPath(capturePath string) string {
+	if capturePath == "" {
+		return ""
+	}
+	return capturePath + "gc"
 }
 
 // ---------------- Manager ----------------
@@ -412,12 +426,13 @@ func (m *Manager) startGCNow(rawID string) {
 	m.notify()
 
 	req := RestreamRequest{
-		RawID:   rawID,
-		Path:    path,
-		Dest:    dest,
-		Quality: m.Quality(),
-		OnStats: func(s status.StreamStats) { m.onGCStats(rawID, gcGen, s) },
-		OnExit:  func(err error) { m.onGCExit(rawID, gcGen, err) },
+		RawID:       rawID,
+		Path:        path,
+		Dest:        dest,
+		Quality:     m.Quality(),
+		PreviewPath: egressPath(path),
+		OnStats:     func(s status.StreamStats) { m.onGCStats(rawID, gcGen, s) },
+		OnExit:      func(err error) { m.onGCExit(rawID, gcGen, err) },
 	}
 
 	handle, err := m.restream.Start(req)
@@ -540,6 +555,7 @@ func (m *Manager) Snapshot() ([]status.DeviceStatus, GCGlobal) {
 		}
 		if c.GC == GCStreaming {
 			ds.GCActive = true
+			ds.EgressPath = egressPath(c.Path) // local preview of the GameChanger feed
 			g.Active = true
 			g.Path = c.Path
 			g.RawID = c.RawID

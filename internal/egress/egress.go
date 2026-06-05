@@ -48,8 +48,8 @@ func (e *Egress) Start(req camera.RestreamRequest) (camera.RestreamHandle, error
 	}
 
 	enc := encode.ParamsFor(req.Quality)
-	args := buildGCArgs(req.Path, req.Dest, enc, e.srtPort)
-	log.Printf("[gamechanger] %s pull cam=%s → %s (quality=%s)", req.RawID, req.Path, req.Dest, encode.NormalizeQuality(req.Quality))
+	args := buildGCArgs(req.Path, req.Dest, enc, e.srtPort, req.PreviewPath)
+	log.Printf("[gamechanger] %s pull cam=%s → %s (quality=%s, preview=%s)", req.RawID, req.Path, req.Dest, encode.NormalizeQuality(req.Quality), req.PreviewPath)
 	log.Printf("[gamechanger] ffmpeg %v", args)
 
 	cmd := exec.Command(ffmpegPath, args...)

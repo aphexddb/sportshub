@@ -44,6 +44,10 @@ type DeviceStatus struct {
 	GCLast      *GCConfig    `json:"gcLast,omitempty"`
 	Stats       *StreamStats `json:"stats,omitempty"`
 	EgressStats *StreamStats `json:"egressStats,omitempty"`
+	// EgressPath is the local media-server path carrying the exact stream being pushed to
+	// GameChanger (a copy of the re-encoded feed), set while GC is streaming so the UI can
+	// preview "what's going to GameChanger" at /watch/<egressPath>.
+	EgressPath string `json:"egressPath,omitempty"`
 }
 
 // GlobalStatus is the server-wide view pushed over SSE.

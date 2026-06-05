@@ -101,6 +101,11 @@
                   class="hidden px-6 py-2 rounded-2xl bg-red-600 hover:bg-red-500 font-semibold text-sm">
             Stop
           </button>
+          <a id="gc-watch-link" href="#" target="_blank" rel="noopener"
+             class="hidden px-6 py-2 rounded-2xl bg-zinc-800 hover:bg-zinc-700 font-semibold text-sm"
+             title="Preview exactly what's being sent to GameChanger">
+            &#9654; Watch GC feed
+          </a>
         </div>
       </div>
     </div>
@@ -431,6 +436,13 @@ function applyServerStatus(update) {
   const gcStopBtn = document.getElementById('gc-stop-btn');
   if (gcStopBtn && update.global) {
     gcStopBtn.classList.toggle('hidden', !update.global.gcActive);
+  }
+  // "Watch GC feed" link → the local preview of exactly what's pushed to GameChanger.
+  const gcWatch = document.getElementById('gc-watch-link');
+  if (gcWatch && update.global) {
+    const active = !!update.global.gcActive;
+    gcWatch.classList.toggle('hidden', !active);
+    if (active && update.global.gcPath) gcWatch.href = '/watch/' + update.global.gcPath + 'gc';
   }
 }
 

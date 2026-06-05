@@ -18,7 +18,7 @@ func TestSrtReadURL(t *testing.T) {
 
 func TestBuildGCArgs_QualityAndPassthrough(t *testing.T) {
 	enc := encode.ParamsFor("720p")
-	args := buildGCArgs("cam0", "rtmp://ingest.example/app/key", enc, 8890)
+	args := buildGCArgs("cam0", "rtmp://ingest.example/app/key", enc, 8890, "")
 
 	// Source is the SRT read URL.
 	iIdx := indexOf(args, "-i")
@@ -33,7 +33,11 @@ func TestBuildGCArgs_QualityAndPassthrough(t *testing.T) {
 		"-bufsize": enc.BufSize,
 		"-level":   enc.Level,
 	})
-	// Output format flv, dest is the final arg, verbatim.
+	// Without a preview path: single FLV output, dest is the final arg, verbatim.
+	fIdx := lastIndexOf(args, "-f")
+	if fIdx < 0 || args[fIdx+1] != "flv" {
+		t.Fatalf("expected -f flv output, got %v", args)
+	}
 	if args[len(args)-1] != "rtmp://ingest.example/app/key" {
 		t.Fatalf("dest must be the final arg verbatim, got %q", args[len(args)-1])
 	}
@@ -42,32 +46,51 @@ func TestBuildGCArgs_QualityAndPassthrough(t *testing.T) {
 func TestBuildGCArgs_RTMPSPassthrough(t *testing.T) {
 	enc := encode.ParamsFor("1080p")
 	dest := "rtmps://601c62c19c9e.global-contribute.live-video.net:443/app/sk_secret?gc_ext=true"
-	args := buildGCArgs("cam0", dest, enc, 8890)
+	args := buildGCArgs("cam0", dest, enc, 8890, "")
 
 	// Secure RTMPS destination must pass through unchanged as the final ffmpeg arg.
 	if args[len(args)-1] != dest {
 		t.Fatalf("rtmps dest must pass through verbatim, got %q", args[len(args)-1])
 	}
-	// And we still output FLV (ffmpeg negotiates TLS for rtmps:// transparently).
-	fIdx := lastIndexOf(args, "-f")
-	if fIdx < 0 || args[fIdx+1] != "flv" {
-		t.Fatalf("expected -f flv output, got %v", args)
-	}
-	// rtmps gets a read/write timeout (15s in microseconds) as the flag/value pair right
-	// before the dest: [..., "-rw_timeout", "15000000", dest].
+	// rtmps gets a read/write timeout (15s in microseconds) just before -f flv dest.
 	rwIdx := indexOf(args, "-rw_timeout")
 	if rwIdx < 0 || args[rwIdx+1] != "15000000" {
 		t.Fatalf("expected -rw_timeout 15000000 for rtmps, got %v", args)
 	}
-	if rwIdx != len(args)-3 {
-		t.Fatalf("-rw_timeout/value must immediately precede the dest, got %v", args)
+	if args[rwIdx+2] != "-f" || args[rwIdx+3] != "flv" || args[rwIdx+4] != dest {
+		t.Fatalf("-rw_timeout must immediately precede -f flv <dest>, got %v", args)
 	}
 }
 
 func TestBuildGCArgs_PlainRTMP_NoRWTimeout(t *testing.T) {
-	args := buildGCArgs("cam0", "rtmp://ingest.example/app/key", encode.ParamsFor("1080p"), 8890)
+	args := buildGCArgs("cam0", "rtmp://ingest.example/app/key", encode.ParamsFor("1080p"), 8890, "")
 	if indexOf(args, "-rw_timeout") >= 0 {
 		t.Fatalf("plain rtmp:// must NOT get -rw_timeout, got %v", args)
+	}
+}
+
+func TestBuildGCArgs_PreviewTee(t *testing.T) {
+	dest := "rtmps://h:443/app/key?gc_ext=true"
+	args := buildGCArgs("cam0", dest, encode.ParamsFor("1080p"), 8890, "cam0gc")
+
+	// Output uses the tee muxer as the final arg.
+	fIdx := lastIndexOf(args, "-f")
+	if fIdx < 0 || args[fIdx+1] != "tee" {
+		t.Fatalf("expected -f tee output, got %v", args)
+	}
+	tee := args[len(args)-1]
+	// GameChanger destination as the FLV slave (default onfail=abort surfaces real failures).
+	if !strings.Contains(tee, "[f=flv]"+dest) {
+		t.Fatalf("tee must push dest as FLV slave, got %q", tee)
+	}
+	// Local preview as an MPEG-TS/SRT publish slave that can't break the broadcast.
+	wantPreview := "[f=mpegts:onfail=ignore]srt://127.0.0.1:8890?streamid=publish:cam0gc"
+	if !strings.Contains(tee, wantPreview) {
+		t.Fatalf("tee must include preview slave %q, got %q", wantPreview, tee)
+	}
+	// rtmps still gets its fast-fail timeout, before -f tee.
+	if rwIdx := indexOf(args, "-rw_timeout"); rwIdx < 0 || args[rwIdx+2] != "-f" || args[rwIdx+3] != "tee" {
+		t.Fatalf("rtmps -rw_timeout must precede -f tee, got %v", args)
 	}
 }
 

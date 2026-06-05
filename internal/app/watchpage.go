@@ -165,15 +165,21 @@ func watchPage(streamPath, host string, webrtcPort int, hlsURL, rtmpURL string) 
       setTimeout(() => { if (live && !playing && !usingHls) useHLS('WebRTC timeout'); }, 4500);
     }
 
+    const isGcPath = /gc$/.test(path);
+
     function applySnapshot(snap) {
       const devs = (snap && Array.isArray(snap.devices)) ? snap.devices : [];
-      // A device exposes its path only while live, so a path match means it's streamable now.
-      const dev = devs.find(d => d.path === path && d.state === 'live');
-      if (dev && dev.name) camTitle.textContent = dev.name + ' (' + path + ')';
+      // A device exposes its capture path only while live (state==live). It also exposes an
+      // egressPath while pushing to GameChanger — the local copy of exactly that feed. Either
+      // match means this path is streamable now.
+      let dev = devs.find(d => d.path === path && d.state === 'live');
+      let isGC = false;
+      if (!dev) { dev = devs.find(d => d.egressPath === path && d.gcPhase === 'streaming'); isGC = !!dev; }
+      if (dev) camTitle.textContent = (isGC ? 'GameChanger feed' : (dev.name || path)) + ' (' + path + ')';
       const nowLive = !!dev;
       if (nowLive && !live) { live = true; startPlayback(); }
-      else if (!nowLive && live) { live = false; showOffline('Camera stopped. The stream has ended.'); }
-      else if (!nowLive && !live && !playerStarted) { showOffline(); }
+      else if (!nowLive && live) { live = false; showOffline(isGcPath ? 'GameChanger stream has ended.' : 'Camera stopped. The stream has ended.'); }
+      else if (!nowLive && !live && !playerStarted) { showOffline(isGcPath ? 'GameChanger isn’t streaming right now.' : null); }
     }
 
     function connectSSE() {

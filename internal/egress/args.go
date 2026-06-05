@@ -18,9 +18,20 @@ func srtReadURL(srtPort int, streamPath string) string {
 	return fmt.Sprintf("srt://127.0.0.1:%d?streamid=read:%s&latency=30000&mode=caller", srtPort, streamPath)
 }
 
+// srtPublishURL builds the local SRT publish URL for a preview path.
+func srtPublishURL(srtPort int, streamPath string) string {
+	return fmt.Sprintf("srt://127.0.0.1:%d?streamid=publish:%s&latency=30000&mode=caller", srtPort, streamPath)
+}
+
 // buildGCArgs builds the GameChanger restream ffmpeg command: SRT pull → re-encode (per the
-// quality's GameChanger-recommended near-CBR settings) → FLV to the destination. dest is
+// quality's GameChanger-recommended near-CBR settings) → push to the destination. dest is
 // passed through verbatim, so both rtmp:// and rtmps:// destinations are supported.
+//
+// If previewPath is non-empty, ffmpeg encodes ONCE and tees the result to two outputs: the
+// GameChanger destination (FLV) and a local MPEG-TS/SRT publish on previewPath, so the UI can
+// preview exactly what's being pushed. The preview slave uses onfail=ignore so a preview hiccup
+// can never break the actual broadcast; the GameChanger slave uses the default (abort) so a real
+// push failure still surfaces.
 //
 // The bundled ffmpeg is built with TLS (schannel on Windows, OpenSSL elsewhere), so its native
 // RTMP implementation negotiates TLS for rtmps:// over the system trust store with no extra
@@ -28,7 +39,7 @@ func srtReadURL(srtPort int, streamPath string) string {
 // RTMP connect/publish exchange with certificate verification at its secure default, so we do
 // NOT pass "-tls_verify 0" (it would weaken the push for no benefit). For rtmps we add a 15s
 // read/write timeout so a half-open TLS handshake fails fast instead of hanging the push.
-func buildGCArgs(streamPath, dest string, enc encode.Params, srtPort int) []string {
+func buildGCArgs(streamPath, dest string, enc encode.Params, srtPort int, previewPath string) []string {
 	source := srtReadURL(srtPort, streamPath)
 	args := []string{
 		"-fflags", "nobuffer",
@@ -39,6 +50,9 @@ func buildGCArgs(streamPath, dest string, enc encode.Params, srtPort int) []stri
 		"-analyzeduration", "1000000",
 		"-err_detect", "ignore_err",
 		"-i", source,
+		// Map all input streams explicitly — the tee muxer requires it ("Invalid argument"
+		// otherwise). Harmless for the single-output path (one video stream either way).
+		"-map", "0",
 		"-vf", "scale=" + enc.Scale,
 		"-r", "30",
 		"-c:v", "libx264",
@@ -57,16 +71,19 @@ func buildGCArgs(streamPath, dest string, enc encode.Params, srtPort int) []stri
 		"-b:a", "160k",
 		"-ar", "48000",
 		"-ac", "2",
-		"-f", "flv",
 	}
 
 	// For secure rtmps destinations, add a read/write timeout (15s, in microseconds) so a
-	// half-open TLS handshake fails fast instead of hanging the push goroutine. Per-stream
-	// option: it must precede the output URL.
+	// half-open TLS handshake fails fast instead of hanging the push. Output option: precede -f.
 	if isRTMPS(dest) {
 		args = append(args, "-rw_timeout", "15000000")
 	}
 
-	args = append(args, dest)
+	if previewPath != "" {
+		tee := "[f=flv]" + dest + "|[f=mpegts:onfail=ignore]" + srtPublishURL(srtPort, previewPath)
+		args = append(args, "-f", "tee", tee)
+	} else {
+		args = append(args, "-f", "flv", dest)
+	}
 	return args
 }
