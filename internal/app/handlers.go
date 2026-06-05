@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/skip2/go-qrcode"
@@ -14,6 +15,16 @@ import (
 	"sportshub2/internal/sources"
 	"sportshub2/internal/status"
 )
+
+// httpPort is the numeric port the dashboard/API listens on, parsed from cfg.Port (e.g.
+// ":80" -> 80). The web UI uses it (via /api/config) to build /watch links, so it must
+// reflect the real port, not a hardcoded value.
+func (a *App) httpPort() int {
+	if n, err := strconv.Atoi(strings.TrimPrefix(a.cfg.Port, ":")); err == nil && n > 0 {
+		return n
+	}
+	return 8080
+}
 
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
@@ -46,7 +57,7 @@ func (a *App) handleStatus(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, status.ServerConfig{
 		Host:     a.host,
-		Port:     8080,
+		Port:     a.httpPort(),
 		RTMPPort: a.addrs.RTMP,
 		HLSPort:  a.addrs.HLS,
 	})

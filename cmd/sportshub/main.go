@@ -5,6 +5,7 @@ package main
 import (
 	_ "embed"
 	"log"
+	"runtime"
 
 	"sportshub2/internal/app"
 )
@@ -22,7 +23,17 @@ var (
 
 func main() {
 	log.Printf("sportshub %s (commit %s, built %s)", version, commit, date)
-	a := app.New(app.Config{HLSJS: hlsJS, Port: ":8080", Version: version})
+
+	// Serve on the standard HTTP port (80) on Linux/macOS so the dashboard is reachable at a
+	// bare http://<host>/. On Windows, where binding 80 commonly collides with IIS/other
+	// services and needs elevation, keep 8080. (Port 80 needs root/admin on Linux — the
+	// Raspberry Pi systemd unit runs as root, so that's covered.)
+	port := ":80"
+	if runtime.GOOS == "windows" {
+		port = ":8080"
+	}
+
+	a := app.New(app.Config{HLSJS: hlsJS, Port: port, Version: version})
 	if err := a.Run(); err != nil {
 		log.Fatal(err)
 	}
