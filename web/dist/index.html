@@ -657,7 +657,7 @@ function renderServerCameras() {
         `;
       } else if (effGCLast) {
         gcActions = `
-          <button onclick="restartGCWithLast('${effPath}', '${(live && live.rawId) || cam.id || ''}', ${JSON.stringify(effGCLast)})"
+          <button onclick="restartGCWithLast('${effPath}', '${(live && live.rawId) || cam.id || ''}', ${escAttr(JSON.stringify(effGCLast))})"
                   class="px-3 py-1 text-xs rounded-2xl bg-amber-600 hover:bg-amber-500 font-medium">
             Restart GC (last)
           </button>
@@ -693,7 +693,7 @@ function renderServerCameras() {
       // last-only (synthetic or from push) for a device with no current local path
       const r = cam.id;
       gcActions = `
-        <button onclick="restartGCWithLast('', '${r}', ${JSON.stringify(effGCLast)})" 
+        <button onclick="restartGCWithLast('', '${r}', ${escAttr(JSON.stringify(effGCLast))})" 
                 class="px-3 py-1 text-xs rounded-2xl bg-amber-600 hover:bg-amber-500 font-medium">
           Restart GC (last)
         </button>
@@ -792,6 +792,18 @@ async function stopGameChangerAndRefresh() {
   }
   console.log('[GameChanger] GC stop requested, refreshing state');
   await refreshServerCameras();
+}
+
+// escAttr makes a string safe to embed inside a double-quoted HTML attribute (e.g. an inline
+// onclick). Without this, a JSON.stringify(...) argument's double quotes terminate the
+// attribute and the handler silently breaks.
+function escAttr(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }
 
 // Restart GC for this path (or raw device) using its last saved config.
