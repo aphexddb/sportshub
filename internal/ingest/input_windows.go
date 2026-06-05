@@ -3,8 +3,11 @@
 package ingest
 
 import (
+	"fmt"
 	"os/exec"
 	"strings"
+
+	"sportshub2/internal/ffmpeg"
 )
 
 // buildCaptureCmd builds the DirectShow ffmpeg capture for a Windows device.
@@ -12,7 +15,11 @@ import (
 // Common pattern for USB webcams and Mevo Start in webcam mode:
 //
 //	video="Mevo-2GB5D"  ->  audio="Microphone (Mevo-2GB5D)"
-func buildCaptureCmd(ffmpegPath, rawID string, srtPort int, streamPath string) (*exec.Cmd, error) {
+func buildCaptureCmd(rawID string, srtPort int, streamPath string) (*exec.Cmd, error) {
+	ffmpegPath, err := ffmpeg.Path()
+	if err != nil {
+		return nil, fmt.Errorf("ffmpeg unavailable: %w", err)
+	}
 	input := rawID
 	if !strings.HasPrefix(strings.ToLower(input), "video=") {
 		input = "video=" + input

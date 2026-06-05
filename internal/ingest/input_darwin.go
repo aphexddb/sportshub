@@ -2,12 +2,21 @@
 
 package ingest
 
-import "os/exec"
+import (
+	"fmt"
+	"os/exec"
+
+	"sportshub2/internal/ffmpeg"
+)
 
 // buildCaptureCmd builds the avfoundation ffmpeg capture for a macOS device. rawID is the
 // device index reported by internal/sources (e.g. "0"). Video-only here; avfoundation audio
 // is a separate device and is left out of the spike capture.
-func buildCaptureCmd(ffmpegPath, rawID string, srtPort int, streamPath string) (*exec.Cmd, error) {
+func buildCaptureCmd(rawID string, srtPort int, streamPath string) (*exec.Cmd, error) {
+	ffmpegPath, err := ffmpeg.Path()
+	if err != nil {
+		return nil, fmt.Errorf("ffmpeg unavailable: %w", err)
+	}
 	if rawID == "" {
 		rawID = "0"
 	}

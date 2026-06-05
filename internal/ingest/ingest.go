@@ -50,12 +50,7 @@ func (i *Ingest) Start(rawID, streamPath string) error {
 	}
 	i.mu.Unlock()
 
-	ffmpegPath, err := ffmpeg.Path()
-	if err != nil {
-		return fmt.Errorf("ffmpeg unavailable: %w", err)
-	}
-
-	cmd, err := buildCaptureCmd(ffmpegPath, rawID, i.srtPort, streamPath)
+	cmd, err := buildCaptureCmd(rawID, i.srtPort, streamPath)
 	if err != nil {
 		return err
 	}
