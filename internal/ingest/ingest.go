@@ -55,16 +55,19 @@ func (i *Ingest) Start(rawID, streamPath string) error {
 		return fmt.Errorf("ffmpeg unavailable: %w", err)
 	}
 
-	args := buildIngestArgs(captureSpec(rawID), i.srtPort, streamPath)
-	log.Printf("[ingest] starting ffmpeg for device %s → path %s", rawID, streamPath)
-	log.Printf("[ingest] ffmpeg %v", args)
+	cmd, err := buildCaptureCmd(ffmpegPath, rawID, i.srtPort, streamPath)
+	if err != nil {
+		return err
+	}
+	prepareCmd(cmd) // own process group on unix so pipelines (rpicam | ffmpeg) die together
+	log.Printf("[ingest] starting capture for device %s → path %s", rawID, streamPath)
+	log.Printf("[ingest] %s %v", cmd.Path, cmd.Args)
 
-	cmd := exec.Command(ffmpegPath, args...)
 	stderrPipe, _ := cmd.StderrPipe()
 	go i.readStderr(rawID, stderrPipe)
 
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("failed to start ffmpeg: %w", err)
+		return fmt.Errorf("failed to start capture: %w", err)
 	}
 
 	i.mu.Lock()
@@ -102,7 +105,7 @@ func (i *Ingest) Stop(rawID string) {
 
 	if cmd != nil && cmd.Process != nil {
 		log.Printf("[ingest] stopping capture for %s", rawID)
-		_ = cmd.Process.Kill()
+		killCmd(cmd) // kills the whole process group (rpicam + ffmpeg), not just the leader
 	}
 }
 
