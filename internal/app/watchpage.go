@@ -36,49 +36,24 @@ func watchPage(streamPath, host string, webrtcPort int, hlsURL, rtmpURL string) 
     const webrtcUrl = 'http://%s:%d/' + path + '/whep';
     const hlsUrl = '%s';
 
-    async function startWebRTC() {
-      try {
-        const pc = new RTCPeerConnection();
-        pc.ontrack = (event) => {
-          if (event.streams && event.streams[0]) {
-            video.srcObject = event.streams[0];
-            statusEl.textContent = 'Playing via WebRTC (low latency)';
-            video.play().catch(() => {});
-          }
-        };
-        pc.onconnectionstatechange = () => {
-          statusEl.textContent = 'WebRTC state: ' + pc.connectionState;
-        };
+    let usingHls = false;
+    let playing = false;
+    video.addEventListener('playing', () => { playing = true; });
 
-        const offer = await pc.createOffer({
-          offerToReceiveVideo: true,
-          offerToReceiveAudio: true
-        });
-        await pc.setLocalDescription(offer);
-
-        const res = await fetch(webrtcUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/sdp' },
-          body: offer.sdp
-        });
-
-        if (!res.ok) throw new Error('WHEP failed: ' + res.status);
-
-        const answerSdp = await res.text();
-        await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
-      } catch (err) {
-        console.error('WebRTC failed, falling back to HLS:', err);
-        statusEl.textContent = 'WebRTC failed, using HLS...';
-        startHLSFallback();
-      }
-    }
-
-    function startHLSFallback() {
+    // Fall back to HLS. Idempotent: safe to call from the WHEP catch, a failed/disconnected
+    // WebRTC connection, or the watchdog timer below.
+    function useHLS(reason) {
+      if (usingHls) return;
+      usingHls = true;
+      statusEl.textContent = 'Playing via HLS' + (reason ? ' (' + reason + ')' : '');
+      try { if (window.__pc) window.__pc.close(); } catch (e) {}
+      video.srcObject = null;
       if (typeof Hls !== 'undefined' && Hls.isSupported()) {
         const hls = new Hls({ enableWorker: true, lowLatencyMode: true, backBufferLength: 8, maxBufferLength: 12 });
         hls.loadSource(hlsUrl);
         hls.attachMedia(video);
         hls.on(Hls.Events.MANIFEST_PARSED, () => { video.play().catch(()=>{}); });
+        hls.on(Hls.Events.ERROR, (e, d) => { if (d && d.fatal) statusEl.textContent = 'HLS error: ' + d.details; });
       } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
         video.src = hlsUrl;
         video.addEventListener('loadedmetadata', () => { video.play().catch(()=>{}); });
@@ -87,8 +62,50 @@ func watchPage(streamPath, host string, webrtcPort int, hlsURL, rtmpURL string) 
       }
     }
 
-    // Prefer WebRTC for ~1s latency on local LAN
+    async function startWebRTC() {
+      try {
+        const pc = new RTCPeerConnection();
+        window.__pc = pc;
+        pc.ontrack = (event) => {
+          if (event.streams && event.streams[0]) {
+            video.srcObject = event.streams[0];
+            video.play().catch(() => {});
+          }
+        };
+        pc.onconnectionstatechange = () => {
+          if (usingHls) return;
+          if (pc.connectionState === 'connected') {
+            statusEl.textContent = 'Playing via WebRTC (low latency)';
+          } else if (['failed', 'disconnected', 'closed'].includes(pc.connectionState)) {
+            useHLS('WebRTC ' + pc.connectionState);
+          } else {
+            statusEl.textContent = 'WebRTC: ' + pc.connectionState;
+          }
+        };
+
+        const offer = await pc.createOffer({ offerToReceiveVideo: true, offerToReceiveAudio: true });
+        await pc.setLocalDescription(offer);
+
+        const res = await fetch(webrtcUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/sdp' },
+          body: offer.sdp
+        });
+        if (!res.ok) throw new Error('WHEP failed: ' + res.status);
+
+        const answerSdp = await res.text();
+        await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
+      } catch (err) {
+        console.error('WebRTC failed, falling back to HLS:', err);
+        useHLS('WebRTC unavailable');
+      }
+    }
+
+    // Prefer WebRTC for ~1s latency on local LAN, but if no frames are playing within a few
+    // seconds (e.g. WebRTC connected but ICE/codec produced no video), fall back to HLS so the
+    // viewer always shows video.
     startWebRTC();
+    setTimeout(() => { if (!playing && !usingHls) useHLS('WebRTC timeout'); }, 4500);
   </script>
 </body>
 </html>`, streamPath, streamPath, webrtcPort, hlsURL, rtmpURL, streamPath, host, webrtcPort, hlsURL)
