@@ -8,7 +8,7 @@ PKG     := ./cmd/sportshub
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
-.PHONY: build run test vet fmt snapshot release check clean
+.PHONY: build run test vet fmt snapshot release check clean tag
 
 ## build: compile a host binary (embedded assets) into ./bin
 build:
@@ -37,6 +37,18 @@ release:
 ## check: validate the GoReleaser config
 check:
 	goreleaser check
+
+## tag: compute the next semver from commit messages (svu) and push it, triggering a release.
+## Override the version with `make tag V=v0.1.0` (required for the first release).
+## Installs svu on demand: https://github.com/caarlos0/svu
+tag:
+	@command -v svu >/dev/null 2>&1 || go install github.com/caarlos0/svu/v3@latest
+	@NEXT="$${V:-$$(svu next)}"; \
+	if git rev-parse "$$NEXT" >/dev/null 2>&1; then echo "tag $$NEXT already exists"; exit 1; fi; \
+	echo "Releasing $$NEXT"; \
+	git log --pretty=format:"  %s" $$(git describe --tags --abbrev=0 2>/dev/null)..HEAD; echo; \
+	read -p "Create and push $$NEXT? [y/N] " ok; [ "$$ok" = y ] || exit 1; \
+	git tag -a "$$NEXT" -m "Release $$NEXT" && git push origin "$$NEXT"
 
 clean:
 	rm -rf dist bin
