@@ -8,8 +8,8 @@ import (
 	"os/exec"
 	"strings"
 
-	"sportshub2/internal/devices"
-	"sportshub2/internal/ffmpeg"
+	"sportshub/internal/devices"
+	"sportshub/internal/ffmpeg"
 )
 
 // listCamerasImpl is the macOS implementation (called from sources.go).

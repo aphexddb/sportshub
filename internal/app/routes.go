@@ -3,7 +3,7 @@ package app
 import (
 	"net/http"
 
-	"sportshub2/web"
+	"sportshub/web"
 )
 
 // routes builds the HTTP mux. The paths and methods exactly match the contract the web UI

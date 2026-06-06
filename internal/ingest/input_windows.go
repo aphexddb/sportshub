@@ -7,8 +7,8 @@ import (
 	"os/exec"
 	"strings"
 
-	"sportshub2/internal/devices"
-	"sportshub2/internal/ffmpeg"
+	"sportshub/internal/devices"
+	"sportshub/internal/ffmpeg"
 )
 
 // buildCaptureCmd builds the DirectShow ffmpeg capture for a Windows device.

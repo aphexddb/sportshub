@@ -7,7 +7,7 @@ import (
 	"log"
 	"runtime"
 
-	"sportshub2/internal/app"
+	"sportshub/internal/app"
 )
 
 //go:embed static/hls.min.js

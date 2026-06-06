@@ -14,15 +14,15 @@ import (
 	"syscall"
 	"time"
 
-	"sportshub2/internal/camera"
-	"sportshub2/internal/egress"
-	"sportshub2/internal/ffmpeg"
-	"sportshub2/internal/ingest"
-	"sportshub2/internal/mediaserver"
-	"sportshub2/internal/netutil"
-	"sportshub2/internal/proc"
-	"sportshub2/internal/sse"
-	"sportshub2/internal/status"
+	"sportshub/internal/camera"
+	"sportshub/internal/egress"
+	"sportshub/internal/ffmpeg"
+	"sportshub/internal/ingest"
+	"sportshub/internal/mediaserver"
+	"sportshub/internal/netutil"
+	"sportshub/internal/proc"
+	"sportshub/internal/sse"
+	"sportshub/internal/status"
 )
 
 // Config holds the externally-provided inputs to the app.

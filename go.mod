@@ -1,4 +1,4 @@
-module sportshub2
+module sportshub
 
 go 1.26.2
 

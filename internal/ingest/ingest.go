@@ -11,8 +11,8 @@ import (
 	"strings"
 	"sync"
 
-	"sportshub2/internal/ffmpeg"
-	"sportshub2/internal/status"
+	"sportshub/internal/ffmpeg"
+	"sportshub/internal/status"
 )
 
 // Ingest manages all active capture processes.

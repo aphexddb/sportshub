@@ -11,10 +11,10 @@ import (
 	"strings"
 	"sync"
 
-	"sportshub2/internal/camera"
-	"sportshub2/internal/encode"
-	"sportshub2/internal/ffmpeg"
-	"sportshub2/internal/status"
+	"sportshub/internal/camera"
+	"sportshub/internal/encode"
+	"sportshub/internal/ffmpeg"
+	"sportshub/internal/status"
 )
 
 // Egress launches GameChanger push processes.

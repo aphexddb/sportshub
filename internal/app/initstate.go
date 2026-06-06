@@ -3,7 +3,7 @@ package app
 import (
 	"sync"
 
-	"sportshub2/internal/status"
+	"sportshub/internal/status"
 )
 
 // bootState tracks the app's startup sequence so a single loading spinner with a live status

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"sportshub2/internal/encode"
+	"sportshub/internal/encode"
 )
 
 // isRTMPS reports whether dest is a secure RTMP-over-TLS URL (rtmps://...). The scheme check

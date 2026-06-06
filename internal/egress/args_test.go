@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"sportshub2/internal/encode"
-	"sportshub2/internal/status"
+	"sportshub/internal/encode"
+	"sportshub/internal/status"
 )
 
 func TestSrtReadURL(t *testing.T) {

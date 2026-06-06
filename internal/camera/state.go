@@ -29,7 +29,7 @@
 // tested with fakes — no real ffmpeg or media server required.
 package camera
 
-import "sportshub2/internal/status"
+import "sportshub/internal/status"
 
 // CamState is the capture lifecycle state for one camera.
 type CamState string

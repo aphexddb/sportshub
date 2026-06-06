@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"os/exec"
 
-	"sportshub2/internal/devices"
-	"sportshub2/internal/ffmpeg"
+	"sportshub/internal/devices"
+	"sportshub/internal/ffmpeg"
 )
 
 // buildCaptureCmd is a compile-only fallback for unsupported OSes: a synthetic test source so

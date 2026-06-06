@@ -10,7 +10,7 @@ import (
 	"sort"
 	"strings"
 
-	"sportshub2/internal/devices"
+	"sportshub/internal/devices"
 )
 
 // listCamerasImpl enumerates real cameras on Linux. On a Raspberry Pi the /dev/video* space is

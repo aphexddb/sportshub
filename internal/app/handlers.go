@@ -11,9 +11,9 @@ import (
 
 	"github.com/skip2/go-qrcode"
 
-	"sportshub2/internal/encode"
-	"sportshub2/internal/sources"
-	"sportshub2/internal/status"
+	"sportshub/internal/encode"
+	"sportshub/internal/sources"
+	"sportshub/internal/status"
 )
 
 // httpPort is the numeric port the dashboard/API listens on, parsed from cfg.Port (e.g.

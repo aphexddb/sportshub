@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"sportshub2/internal/status"
+	"sportshub/internal/status"
 )
 
 // defaultReadyTimeout is how long capture waits for the media server to register

@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"os/exec"
 
-	"sportshub2/internal/devices"
-	"sportshub2/internal/ffmpeg"
+	"sportshub/internal/devices"
+	"sportshub/internal/ffmpeg"
 )
 
 // buildCaptureCmd builds the avfoundation ffmpeg capture for a macOS device. rawID is the

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"sportshub2/internal/status"
+	"sportshub/internal/status"
 )
 
 // ---------------- fakes ----------------
