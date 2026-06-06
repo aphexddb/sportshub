@@ -16,7 +16,7 @@ Plug in a camera, click a button, and the game shows up live on GameChanger for 
 
 ## 🚀 Get it
 
-Go to the [**Releases page**](https://github.com/aphexddb/sportshub/releases), download the file for your computer, and unzip it.
+Go to the [**latest release**](https://github.com/aphexddb/sportshub/releases/latest), download the file for your computer, and unzip it.
 
 - **Windows** → `sportshub_..._windows_amd64.zip`
 - **Mac** → `sportshub_..._darwin_arm64.tar.gz` (newer Macs) or `_amd64` (older)
