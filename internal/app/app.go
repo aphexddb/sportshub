@@ -25,6 +25,7 @@ import (
 	"sportshub/internal/sources"
 	"sportshub/internal/sse"
 	"sportshub/internal/status"
+	"sportshub/internal/wifi"
 )
 
 // Config holds the externally-provided inputs to the app.
@@ -43,6 +44,7 @@ type App struct {
 	cams  *camera.Manager
 	hub   *sse.Hub
 	boot  *bootState
+	wifi  *wifi.Manager
 
 	addrs      mediaserver.Addrs
 	host       string       // non-loopback LAN IP for phone/QR access
@@ -71,6 +73,8 @@ func New(cfg Config) *App {
 
 	// The state machine depends only on interfaces, satisfied by the concrete services above.
 	a.cams = camera.NewManager(a.media, a.ing, a.egr, func() { go a.broadcast() })
+
+	a.wifi = wifi.New(func() { go a.broadcast() })
 
 	return a
 }
@@ -104,6 +108,20 @@ func (a *App) Run() error {
 	log.Printf("Open http://%s%s (use this address from phones on the same LAN) or http://localhost%s", a.host, a.cfg.Port, a.cfg.Port)
 
 	go a.runBoot()
+
+	// Start Wi-Fi AP and keep status fresh on supported hosts (Raspberry Pi with nmcli).
+	if a.wifi.Supported() {
+		go func() {
+			if err := a.wifi.StartAP(context.Background()); err != nil {
+				log.Printf("[wifi] start AP: %v", err)
+			}
+			t := time.NewTicker(5 * time.Second)
+			defer t.Stop()
+			for range t.C {
+				a.wifi.Refresh(context.Background())
+			}
+		}()
+	}
 
 	// Light ticker so live stats keep flowing to the UI even during quiet ffmpeg periods.
 	go func() {
@@ -196,6 +214,9 @@ func (a *App) runBoot() {
 // Close tears everything down: stop all camera captures / GC pushes (killing their ffmpeg
 // children) then stop the in-process media server. Safe to call once.
 func (a *App) Close() error {
+	if err := a.wifi.StopAP(); err != nil {
+		log.Printf("[wifi] stop AP: %v", err)
+	}
 	a.cams.StopAll()
 	return a.media.Close()
 }
@@ -218,6 +239,10 @@ func (a *App) buildSnapshot() status.Snapshot {
 	snap.Global.GCActive = g.Active
 	snap.Global.GCPath = g.Path
 	snap.Global.GCActiveRaw = g.RawID
+
+	w := a.wifi.Status()
+	snap.Global.WiFi = &w
+
 	return snap
 }
 

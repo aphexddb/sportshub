@@ -55,6 +55,7 @@ nfpms:
     bindir: /usr/bin
     dependencies:
       - ffmpeg
+      - network-manager # required for the Wi-Fi AP / captive-portal feature on Raspberry Pi
     contents:
       - src: packaging/sportshub.service
         dst: /lib/systemd/system/sportshub.service

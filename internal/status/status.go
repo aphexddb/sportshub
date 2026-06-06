@@ -61,6 +61,8 @@ type GlobalStatus struct {
 	// SourcesRev bumps whenever the available camera list changes (USB hotplug, etc.), so the
 	// UI can re-fetch /api/sources without polling. Monotonic; the client tracks the last value.
 	SourcesRev int64 `json:"sourcesRev"`
+	// WiFi is the current Wi-Fi AP / upstream connection state; nil on unsupported hosts.
+	WiFi *WiFiStatus `json:"wifi,omitempty"`
 }
 
 // InitCheck is one step of the startup sequence (port cleanup, binaries, media server, ...).
@@ -85,4 +87,18 @@ type Snapshot struct {
 	Init    InitState      `json:"init"`
 	Global  GlobalStatus   `json:"global"`
 	Devices []DeviceStatus `json:"devices"`
+}
+
+// WiFiStatus is the current state of the Wi-Fi AP and upstream connection.
+// Populated by internal/wifi.Manager and included in status broadcasts.
+type WiFiStatus struct {
+	Supported bool   `json:"supported"`
+	APActive  bool   `json:"apActive"`
+	APSSID    string `json:"apSSID,omitempty"`
+	Connected bool   `json:"connected"`
+	SSID      string `json:"ssid,omitempty"`
+	Signal    int    `json:"signal,omitempty"`
+	IP        string `json:"ip,omitempty"`
+	Internet  bool   `json:"internet"`
+	Error     string `json:"error,omitempty"`
 }

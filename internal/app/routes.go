@@ -6,9 +6,9 @@ import (
 	"sportshub/web"
 )
 
-// routes builds the HTTP mux. The paths and methods exactly match the contract the web UI
-// in web/dist/index.html depends on.
-func (a *App) routes() *http.ServeMux {
+// routes builds the HTTP handler. The paths and methods exactly match the contract the web UI
+// in web/dist/index.html depends on. The handler is wrapped with captivePortal middleware.
+func (a *App) routes() http.Handler {
 	mux := http.NewServeMux()
 
 	// Dashboard. Assets are embedded in the binary (or served from disk with -tags dev).
@@ -43,5 +43,11 @@ func (a *App) routes() *http.ServeMux {
 	mux.HandleFunc("/watch/", a.handleWatch)
 	mux.HandleFunc("/static/hls.min.js", a.handleHLSJS)
 
-	return mux
+	// Wi-Fi AP management
+	mux.HandleFunc("/api/wifi/networks", a.handleWiFiNetworks)
+	mux.HandleFunc("/api/wifi/connect", a.handleWiFiConnect)
+	mux.HandleFunc("/api/wifi/disconnect", a.handleWiFiDisconnect)
+	mux.HandleFunc("/api/wifi/status", a.handleWiFiStatus)
+
+	return a.captivePortal(mux)
 }

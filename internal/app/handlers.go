@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -8,12 +9,14 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/skip2/go-qrcode"
 
 	"sportshub/internal/encode"
 	"sportshub/internal/sources"
 	"sportshub/internal/status"
+	"sportshub/internal/wifi"
 )
 
 // httpPort is the numeric port the dashboard/API listens on, parsed from cfg.Port (e.g.
@@ -244,6 +247,75 @@ func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 	}
+}
+
+// ---- Wi-Fi ----
+
+// handleWiFiNetworks performs a Wi-Fi scan and returns the visible networks.
+// Scanning is slow (~10 s on some hardware), so a generous timeout is used.
+// The response always includes a "networks" array (never null) so the UI can rely on
+// Array.isArray. Errors are surfaced in-band so the UI can display them.
+func (a *App) handleWiFiNetworks(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+
+	nets, err := a.wifi.Scan(ctx)
+	if nets == nil {
+		nets = []wifi.Network{}
+	}
+	errStr := ""
+	if err != nil {
+		log.Printf("[wifi] scan error: %v", err)
+		errStr = err.Error()
+	}
+	writeJSON(w, map[string]any{"networks": nets, "error": errStr})
+}
+
+// handleWiFiConnect joins a Wi-Fi network. Body: {"ssid":"...","password":"..."}.
+func (a *App) handleWiFiConnect(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SSID     string `json:"ssid"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if req.SSID == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]any{"ok": false, "error": "ssid is required"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+
+	if err := a.wifi.Connect(ctx, req.SSID, req.Password); err != nil {
+		log.Printf("[wifi] connect %q: %v", req.SSID, err)
+		writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	go a.broadcast()
+	writeJSON(w, map[string]any{"ok": true, "error": ""})
+}
+
+// handleWiFiDisconnect drops the current upstream Wi-Fi connection.
+func (a *App) handleWiFiDisconnect(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+
+	if err := a.wifi.Disconnect(ctx); err != nil {
+		log.Printf("[wifi] disconnect: %v", err)
+		writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	go a.broadcast()
+	writeJSON(w, map[string]any{"ok": true, "error": ""})
+}
+
+// handleWiFiStatus returns the current cached Wi-Fi status.
+func (a *App) handleWiFiStatus(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, a.wifi.Status())
 }
 
 // ---- viewer page ----
