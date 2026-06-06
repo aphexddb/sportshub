@@ -58,6 +58,9 @@ type GlobalStatus struct {
 	GCPath        string `json:"gcPath,omitempty"`
 	GCActiveRaw   string `json:"gcActiveRaw,omitempty"`
 	GCQuality     string `json:"gcQuality"` // global broadcast quality: "1080p" / "720p" / "480p"
+	// SourcesRev bumps whenever the available camera list changes (USB hotplug, etc.), so the
+	// UI can re-fetch /api/sources without polling. Monotonic; the client tracks the last value.
+	SourcesRev int64 `json:"sourcesRev"`
 }
 
 // InitCheck is one step of the startup sequence (port cleanup, binaries, media server, ...).

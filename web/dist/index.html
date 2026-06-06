@@ -336,6 +336,10 @@ function copyDeviceId(id) {
 // =====================================================
 let serverCameras = [];
 let serverActive = {};
+// Last camera-list revision seen from the server (SSE global.sourcesRev). When it increases
+// (a USB camera was plugged/unplugged) we re-fetch /api/sources so the list updates with no
+// manual "Refresh from Server". null = not yet baselined.
+let lastSourcesRev = null;
 
 let activeCleanStreams = []; // still used for a few legacy paths (modals etc.)
 let liveDeviceMap = {}; // rawId -> full DeviceStatus from SSE (includes stats, gc state, etc.)
@@ -402,6 +406,19 @@ function applyServerStatus(update) {
   // treating it as empty — otherwise the UI would ignore the update and stay stale.
   if (!Array.isArray(update.devices)) {
     update.devices = [];
+  }
+
+  // Camera hotplug: when the server bumps sourcesRev (a USB camera was plugged/unplugged),
+  // re-fetch the device list automatically. Baseline on the first snapshot so we don't refetch
+  // spuriously on connect.
+  if (update.global && typeof update.global.sourcesRev === 'number') {
+    if (lastSourcesRev === null) {
+      lastSourcesRev = update.global.sourcesRev;
+    } else if (update.global.sourcesRev > lastSourcesRev) {
+      lastSourcesRev = update.global.sourcesRev;
+      console.log('[sources] device list changed (rev', lastSourcesRev, ') — refreshing');
+      refreshServerCameras();
+    }
   }
 
   console.log('[State] applying state change from server', {

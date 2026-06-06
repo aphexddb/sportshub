@@ -3,6 +3,7 @@ module sportshub
 go 1.26.2
 
 require (
+	github.com/fsnotify/fsnotify v1.8.0
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	github.com/xaionaro-go/mediamtx v0.0.0-20250407011504-3bb943fd8feb
 )
@@ -24,7 +25,6 @@ require (
 	github.com/cloudwego/base64x v0.1.4 // indirect
 	github.com/cloudwego/iasm v0.2.0 // indirect
 	github.com/datarhei/gosrt v0.9.0 // indirect
-	github.com/fsnotify/fsnotify v1.8.0 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.7 // indirect
 	github.com/gin-contrib/pprof v1.5.2 // indirect
 	github.com/gin-contrib/sse v0.1.0 // indirect

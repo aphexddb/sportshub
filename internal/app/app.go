@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	"sportshub/internal/mediaserver"
 	"sportshub/internal/netutil"
 	"sportshub/internal/proc"
+	"sportshub/internal/sources"
 	"sportshub/internal/sse"
 	"sportshub/internal/status"
 )
@@ -42,8 +44,9 @@ type App struct {
 	hub   *sse.Hub
 	boot  *bootState
 
-	addrs mediaserver.Addrs
-	host  string // non-loopback LAN IP for phone/QR access
+	addrs      mediaserver.Addrs
+	host       string       // non-loopback LAN IP for phone/QR access
+	sourcesRev atomic.Int64 // bumped when the available camera list changes (USB hotplug)
 }
 
 // New constructs the app and wires every dependency. Nothing is started yet; call Run.
@@ -112,6 +115,14 @@ func (a *App) Run() error {
 			}
 		}
 	}()
+
+	// Watch for camera plug/unplug (USB hotplug on Linux via inotify; poll elsewhere) and bump
+	// the SSE sources revision so the dashboard auto-refreshes its device list — no manual
+	// "Refresh from Server" needed.
+	go sources.NewWatcher(
+		func() []sources.Camera { c, _ := sources.ListCameras(); return c },
+		func() { a.sourcesRev.Add(1); a.broadcast() },
+	).Run(context.Background())
 
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
@@ -200,6 +211,7 @@ func (a *App) buildSnapshot() status.Snapshot {
 	snap.Global.MediaMTXReady = a.media.IsReady()
 	snap.Global.ActiveIngests = len(a.ing.Active())
 	snap.Global.GCQuality = a.cams.Quality()
+	snap.Global.SourcesRev = a.sourcesRev.Load()
 
 	devs, g := a.cams.Snapshot()
 	snap.Devices = devs
